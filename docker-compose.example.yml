@@ -14,6 +14,7 @@ services:
       # - HISTORY_LIMIT=40
       # - SYSTEM_PROMPT=...
     volumes:
+      # the image runs as uid 65532: sudo mkdir -p /opt/signal-ollama && sudo chown 65532:65532 /opt/signal-ollama
       - /opt/signal-ollama:/data
     depends_on:
       - signal-cli-rest-api

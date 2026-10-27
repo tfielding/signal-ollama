@@ -54,7 +54,19 @@ use the same signal-cli-rest-api account to *send* (alerts etc.) are unaffected.
 ## Run
 
 With Docker Compose, add the service from `docker-compose.example.yml` next to your
-existing `signal-cli-rest-api` service and run `docker compose up -d --build signal-ollama`.
+existing `signal-cli-rest-api` service (use `image: ghcr.io/tfielding/signal-ollama:latest`
+or `build:`). The image runs as a non-root user (uid 65532), so create the data folder first:
+
+```bash
+sudo mkdir -p /opt/signal-ollama && sudo chown 65532:65532 /opt/signal-ollama
+docker compose up -d signal-ollama
+```
+
+Use `SIGNAL_URL=http://signal-cli-rest-api:8080` (the service name), not `localhost`:
+inside a container, `localhost` is the container itself.
+
+The typing indicator only shows if "Typing indicators" is on in your Signal app
+(Settings → Privacy).
 
 Locally:
 
