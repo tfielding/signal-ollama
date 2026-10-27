@@ -56,6 +56,7 @@ type Output struct {
 	IsError   bool
 	Dropped   []string // arguments removed because the tool doesn't accept them
 	Truncated int      // characters cut from Text (0 = complete)
+	Retried   string   // if set, the call with arguments failed with this error and was retried without them
 }
 
 type Options struct {
@@ -148,18 +149,51 @@ func (b *Box) Call(ctx context.Context, name string, args map[string]any) (Outpu
 	defer cancel()
 	args, dropped := cleanArgs(tool.Schema, args)
 
-	var res *mcp.CallToolResult
-	err := b.withSession(ctx, srv, func(cs *mcp.ClientSession) error {
-		var err error
-		res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: tool.remote, Arguments: args})
-		return err
-	})
+	call := func(args map[string]any) (*mcp.CallToolResult, error) {
+		var res *mcp.CallToolResult
+		err := b.withSession(ctx, srv, func(cs *mcp.ClientSession) error {
+			var err error
+			res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: tool.remote, Arguments: args})
+			return err
+		})
+		return res, err
+	}
+	res, err := call(args)
 	if err != nil {
 		return Output{Dropped: dropped}, err
 	}
 	out := convert(res, b.maxChars())
 	out.Dropped = dropped
+
+	// Small models often guess filter values that don't exist ("area: All"). If every
+	// parameter is optional, the unfiltered call is always valid, so retry once without
+	// arguments and tell the model what happened.
+	if out.IsError && len(args) > 0 && !hasRequired(tool.Schema) {
+		failure := strings.TrimSpace(out.Text)
+		if res2, err2 := call(map[string]any{}); err2 == nil && !res2.IsError {
+			all := convert(res2, b.maxChars())
+			all.Dropped = dropped
+			all.Retried = failure
+			all.Text = fmt.Sprintf("[Your filters failed (%s), so this is the unfiltered result. Pick out what the user asked for.]\n%s", failure, all.Text)
+			return all, nil
+		}
+	}
 	return out, nil
+}
+
+// hasRequired reports whether the input schema lists any required parameters.
+func hasRequired(schema any) bool {
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return true
+	}
+	var s struct {
+		Required []string `json:"required"`
+	}
+	if json.Unmarshal(raw, &s) != nil {
+		return true
+	}
+	return len(s.Required) > 0
 }
 
 // cleanArgs removes arguments the tool's input schema doesn't declare. Small models

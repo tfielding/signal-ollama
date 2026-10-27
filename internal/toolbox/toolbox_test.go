@@ -2,6 +2,7 @@ package toolbox
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -178,5 +179,55 @@ func TestUnwrapAndTruncate(t *testing.T) {
 	out := convert(&mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: long}}}, 1001)
 	if out.Truncated == 0 || !utf8.ValidString(out.Text) || !strings.Contains(out.Text, "more characters not shown") {
 		t.Fatalf("truncate: %d valid=%v", out.Truncated, utf8.ValidString(out.Text))
+	}
+}
+
+func TestRetryWithoutFiltersOnError(t *testing.T) {
+	type filters struct {
+		Area string `json:"area,omitempty"`
+	}
+	type needs struct {
+		ID string `json:"id"`
+	}
+	var calls atomic.Int32
+	s := mcp.NewServer(&mcp.Implementation{Name: "ha", Version: "1"}, nil)
+	ro := &mcp.ToolAnnotations{ReadOnlyHint: true}
+	mcp.AddTool(s, &mcp.Tool{Name: "live", Annotations: ro},
+		func(_ context.Context, _ *mcp.CallToolRequest, in filters) (*mcp.CallToolResult, any, error) {
+			calls.Add(1)
+			if in.Area != "" {
+				return nil, nil, fmt.Errorf("Area '%s' does not exist", in.Area)
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Front Door: locked\nMotion: clear"}}}, nil, nil
+		})
+	mcp.AddTool(s, &mcp.Tool{Name: "strict", Annotations: ro},
+		func(_ context.Context, _ *mcp.CallToolRequest, in needs) (*mcp.CallToolResult, any, error) {
+			calls.Add(1)
+			return nil, nil, fmt.Errorf("no item %s", in.ID)
+		})
+	srv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil))
+	defer srv.Close()
+	box := New([]Server{{Name: "ha", URL: srv.URL}}, Options{})
+	defer box.Close()
+	ctx := context.Background()
+
+	out, err := box.Call(ctx, "live", map[string]any{"area": "All"})
+	if err != nil || out.IsError || !strings.Contains(out.Text, "Front Door: locked") ||
+		!strings.Contains(out.Text, "Area 'All' does not exist") || out.Retried == "" || calls.Load() != 2 {
+		t.Fatalf("retry: %+v err=%v calls=%d", out, err, calls.Load())
+	}
+
+	// Tools with a required parameter are not retried without it.
+	calls.Store(0)
+	out, _ = box.Call(ctx, "strict", map[string]any{"id": "x"})
+	if !out.IsError || out.Retried != "" || calls.Load() != 1 {
+		t.Fatalf("strict: %+v calls=%d", out, calls.Load())
+	}
+
+	// A call without arguments that fails is not retried.
+	calls.Store(0)
+	out, _ = box.Call(ctx, "strict", nil)
+	if !out.IsError || out.Retried != "" || calls.Load() > 1 { // here the SDK rejects it before the handler runs
+		t.Fatalf("no-arg failure retried: calls=%d", calls.Load())
 	}
 }

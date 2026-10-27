@@ -357,6 +357,9 @@ func (b *Bot) run(ctx context.Context, sender, model string, msgs []ollama.Messa
 			if len(out.Dropped) > 0 {
 				attrs = append(attrs, "dropped_args", out.Dropped)
 			}
+			if out.Retried != "" {
+				attrs = append(attrs, "retried_without_args", snippet(out.Retried, 120))
+			}
 			if out.Truncated > 0 {
 				attrs = append(attrs, "truncated_chars", out.Truncated)
 			}
