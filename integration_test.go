@@ -36,7 +36,7 @@ func TestEndToEnd(t *testing.T) {
 			}
 			defer c.CloseNow()
 			for _, raw := range []string{
-				// family group message: ignored
+				// group chat message: ignored
 				`{"envelope":{"source":"` + me + `","sourceNumber":"` + me + `","dataMessage":{"message":"group hi","groupInfo":{"groupId":"g1","type":"DELIVER"}}},"account":"` + botNum + `"}`,
 				// our own alert echoed back as a sync message: ignored
 				`{"envelope":{"source":"` + botNum + `","sourceNumber":"` + botNum + `","syncMessage":{"sentMessage":{"message":"ALERT"}}},"account":"` + botNum + `"}`,

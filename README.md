@@ -15,7 +15,7 @@ Signal app ⇄ signal-cli-rest-api (json-rpc) ⇄ signal-ollama ⇄ Ollama
 | Message | Behavior |
 |---|---|
 | Direct message from a number in `ALLOWED_SENDERS` | Answered |
-| Any group message (e.g. a family alerts group) | Ignored |
+| Messages in group chats | Ignored |
 | Direct message from anyone else | Ignored (logged) |
 | Messages the account sends itself (alerts, sync messages) | Ignored |
 

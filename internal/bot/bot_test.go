@@ -15,7 +15,7 @@ import (
 const (
 	me    = "+15550000001" // allowed user
 	own   = "+15550000009" // the bot's number
-	other = "+15550000002" // family member, not allowed
+	other = "+15550000002" // someone not on the allowlist
 )
 
 type fakeMsg struct {
@@ -99,11 +99,11 @@ func expectSilence(t *testing.T, m *fakeMsg) {
 func TestBoundaries(t *testing.T) {
 	b, m, _, _ := setup(t)
 
-	group := dm(me, "hi in the family group")
+	group := dm(me, "hi in a group chat")
 	group.DataMessage.GroupInfo = &signal.GroupInfo{GroupID: "abc"}
 	b.Handle(group)
-	b.Handle(dm(other, "hi from family"))
-	b.Handle(dm(own, "security alert"))
+	b.Handle(dm(other, "hi from someone else"))
+	b.Handle(dm(own, "outgoing alert"))
 	b.Handle(signal.Envelope{SourceNumber: own, SyncMessage: []byte(`{"sentMessage":{"message":"alert"}}`)})
 	b.Handle(signal.Envelope{SourceNumber: me}) // receipt / typing, no dataMessage
 	b.Handle(dm(me, "   "))

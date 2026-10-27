@@ -175,7 +175,7 @@ func (b *Bot) typing(to string) (stop func()) {
 		defer t.Stop()
 		for {
 			if err := b.msg.Typing(b.ctx, to, true); err != nil {
-				slog.Warn("typing indicator failed", "err", err)
+				slog.Debug("typing indicator", "err", err)
 			}
 			select {
 			case <-done:
