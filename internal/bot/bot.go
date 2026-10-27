@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"signal-ollama/internal/format"
 	"signal-ollama/internal/ollama"
 	"signal-ollama/internal/signal"
 	"signal-ollama/internal/store"
@@ -16,7 +17,7 @@ import (
 
 // Messenger is the Signal side (implemented by signal.Client).
 type Messenger interface {
-	Send(ctx context.Context, recipient, text string) error
+	Send(ctx context.Context, recipient, text string, styled bool) error
 	Typing(ctx context.Context, recipient string, on bool) error
 }
 
@@ -142,15 +143,28 @@ func (b *Bot) process(sender, text string, queued int) {
 		kind = "command"
 	}
 	slog.Info("message received", "from", mask(sender), "kind", kind, "chars", len(text), "queued", queued)
-	reply := b.respond(sender, text)
+	reply, fromModel := b.respond(sender, text)
 	if reply == "" {
 		return
 	}
-	if err := b.msg.Send(b.ctx, sender, reply); err != nil {
+	if err := b.send(sender, reply, fromModel); err != nil {
 		slog.Error("send failed", "to", mask(sender), "err", err)
 		return
 	}
 	slog.Info("reply sent", "to", mask(sender), "chars", len(reply), "took", time.Since(start).Round(100*time.Millisecond))
+}
+
+// send delivers a reply. Model replies are Markdown, converted to Signal formatting;
+// if the styled send fails, the raw text is sent as a fallback.
+func (b *Bot) send(to, reply string, fromModel bool) error {
+	if !fromModel {
+		return b.msg.Send(b.ctx, to, reply, false)
+	}
+	if err := b.msg.Send(b.ctx, to, format.ToSignal(reply), true); err != nil {
+		slog.Warn("styled send failed, retrying as plain text", "err", err)
+		return b.msg.Send(b.ctx, to, reply, false)
+	}
+	return nil
 }
 
 func instant(text string) bool {
@@ -158,14 +172,15 @@ func instant(text string) bool {
 	return len(f) > 0 && (f[0] == "/status" || f[0] == "/stats")
 }
 
-func (b *Bot) respond(sender, text string) string {
+// respond returns the reply and whether it came from the model (Markdown) rather than a command.
+func (b *Bot) respond(sender, text string) (string, bool) {
 	chat, err := b.store.Load(sender)
 	if err != nil {
 		slog.Error("load history", "err", err)
-		return "Couldn't load chat history: " + err.Error()
+		return "Couldn't load chat history: " + err.Error(), false
 	}
 	if strings.HasPrefix(text, "/") {
-		return b.command(sender, &chat, text)
+		return b.command(sender, &chat, text), false
 	}
 
 	model := chat.Model
@@ -192,7 +207,7 @@ func (b *Bot) respond(sender, text string) string {
 	b.mu.Unlock()
 	if err != nil {
 		slog.Error("ollama chat", "model", model, "took", time.Since(start).Round(100*time.Millisecond), "err", err)
-		return "Model error: " + err.Error()
+		return "Model error: " + err.Error(), false
 	}
 	slog.Info("model replied", "model", model, "took", time.Since(start).Round(100*time.Millisecond),
 		"tokens", res.Stats.EvalCount, "tok_per_s", fmt.Sprintf("%.1f", res.Stats.TokensPerSecond()))
@@ -208,7 +223,7 @@ func (b *Bot) respond(sender, text string) string {
 	if err := b.store.Save(sender, chat); err != nil {
 		slog.Error("save history", "err", err)
 	}
-	return reply
+	return reply, true
 }
 
 // typing shows the indicator until the returned func is called.

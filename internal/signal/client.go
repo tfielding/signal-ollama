@@ -93,12 +93,18 @@ func (c *Client) listenOnce(ctx context.Context, wsURL string, handle func(Envel
 	}
 }
 
-// Send sends a plain text message to a single recipient.
-func (c *Client) Send(ctx context.Context, recipient, text string) error {
+// Send sends a message to a single recipient. With styled set, the container
+// turns **bold**, *italic*, ~strike~, `mono` and ||spoiler|| into Signal formatting.
+func (c *Client) Send(ctx context.Context, recipient, text string, styled bool) error {
+	mode := "normal"
+	if styled {
+		mode = "styled"
+	}
 	return c.do(ctx, http.MethodPost, "/v2/send", map[string]any{
 		"number":     c.number,
 		"recipients": []string{recipient},
 		"message":    text,
+		"text_mode":  mode,
 	})
 }
 

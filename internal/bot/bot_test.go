@@ -20,14 +20,16 @@ const (
 
 type fakeMsg struct {
 	mu     sync.Mutex
+	styled []bool
 	sent   []string
 	typing []bool
 	ch     chan string
 }
 
-func (f *fakeMsg) Send(_ context.Context, to, text string) error {
+func (f *fakeMsg) Send(_ context.Context, to, text string, styled bool) error {
 	f.mu.Lock()
 	f.sent = append(f.sent, to+": "+text)
+	f.styled = append(f.styled, styled)
 	f.mu.Unlock()
 	f.ch <- text
 	return nil
@@ -260,5 +262,20 @@ func TestStats(t *testing.T) {
 		if !strings.Contains(r, want) {
 			t.Fatalf("missing %q in %q", want, r)
 		}
+	}
+}
+
+func TestModelRepliesStyledCommandsPlain(t *testing.T) {
+	b, m, _, _ := setup(t)
+	b.Handle(dm(me, "## Title"))
+	if r := reply(t, m); r != "echo: ## Title" { // fake echoes; "##" is mid-line so not a heading
+		t.Fatalf("got %q", r)
+	}
+	b.Handle(dm(me, "/help"))
+	reply(t, m)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.styled[0] || m.styled[1] {
+		t.Fatalf("styled flags: %v", m.styled)
 	}
 }

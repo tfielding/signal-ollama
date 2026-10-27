@@ -9,8 +9,10 @@ import (
 	"time"
 )
 
-const defaultSystemPrompt = "You are a helpful assistant chatting over Signal. " +
-	"Keep answers concise. Signal does not render Markdown, so reply in plain text."
+const defaultSystemPrompt = "You are a helpful assistant chatting over Signal on a phone. " +
+	"Keep answers short and conversational unless asked for detail. " +
+	"Formatting: you may use **bold**, *italic*, `code` and simple bullet lists. " +
+	"Do not use headings, tables or horizontal rules."
 
 type Config struct {
 	SignalURL     string          // base URL of signal-cli-rest-api, e.g. http://signal-cli-rest-api:8080

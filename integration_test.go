@@ -120,7 +120,7 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("expected 1 send, got %d: %v", len(sends), sends)
 	}
 	s := sends[0]
-	if s["number"] != botNum || s["message"] != "4" || s["recipients"].([]any)[0] != me {
+	if s["number"] != botNum || s["message"] != "4" || s["recipients"].([]any)[0] != me || s["text_mode"] != "styled" {
 		t.Fatalf("bad send: %v", s)
 	}
 	if len(typing) < 2 || typing[0] != http.MethodPut || typing[len(typing)-1] != http.MethodDelete {
