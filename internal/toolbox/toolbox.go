@@ -67,6 +67,7 @@ type Box struct {
 	tools    []Tool
 	errs     map[string]error // last listing error per server
 	fetched  time.Time
+	hidden   map[string]bool // tools already logged as hidden
 }
 
 func New(servers []Server, opt Options) *Box {
@@ -76,6 +77,7 @@ func New(servers []Server, opt Options) *Box {
 		client:   mcp.NewClient(&mcp.Implementation{Name: "signal-ollama", Version: "1"}, nil),
 		sessions: map[string]*mcp.ClientSession{},
 		errs:     map[string]error{},
+		hidden:   map[string]bool{},
 	}
 }
 
@@ -262,7 +264,13 @@ func (b *Box) filter(tools []Tool) []Tool {
 			continue
 		}
 		if !t.ReadOnly && !b.opt.AllowWrite {
-			slog.Info("hiding tool not marked read-only (set MCP_ALLOW_WRITE=true to allow)", "tool", t.Name, "server", t.server)
+			b.mu.Lock()
+			first := !b.hidden[t.server+"/"+t.Name]
+			b.hidden[t.server+"/"+t.Name] = true
+			b.mu.Unlock()
+			if first {
+				slog.Info("hiding tool not marked read-only (allow with MCP_TOOLS + MCP_ALLOW_WRITE=true)", "tool", t.Name, "server", t.server)
+			}
 			continue
 		}
 		out = append(out, t)
