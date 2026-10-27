@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"signal-ollama/internal/ollama"
 )
@@ -15,6 +16,13 @@ import (
 type Chat struct {
 	Model   string           `json:"model,omitempty"` // empty = default model
 	History []ollama.Message `json:"history"`
+	Last    *LastReply       `json:"last,omitempty"` // timings of the most recent reply, for /stats
+}
+
+type LastReply struct {
+	Model string       `json:"model"`
+	At    time.Time    `json:"at"`
+	Stats ollama.Stats `json:"stats"`
 }
 
 type Store struct{ dir string }

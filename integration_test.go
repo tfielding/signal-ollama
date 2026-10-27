@@ -80,7 +80,10 @@ func TestEndToEnd(t *testing.T) {
 				t.Errorf("bad chat request: %+v", req)
 			}
 			time.Sleep(50 * time.Millisecond)
-			json.NewEncoder(w).Encode(map[string]any{"message": map[string]string{"role": "assistant", "content": " 4 "}})
+			json.NewEncoder(w).Encode(map[string]any{
+				"message":    map[string]string{"role": "assistant", "content": " 4 "},
+				"eval_count": 20, "eval_duration": 400_000_000, "total_duration": 1_000_000_000,
+			})
 		case "/api/tags":
 			json.NewEncoder(w).Encode(map[string]any{"models": []map[string]string{{"name": "llama3.2:latest"}}})
 		}
@@ -123,7 +126,11 @@ func TestEndToEnd(t *testing.T) {
 	if len(typing) < 2 || typing[0] != http.MethodPut || typing[len(typing)-1] != http.MethodDelete {
 		t.Fatalf("typing calls: %v", typing)
 	}
-	if c, _ := st.Load(me); len(c.History) != 2 {
+	c, _ := st.Load(me)
+	if len(c.History) != 2 {
 		t.Fatalf("history not saved: %+v", c)
+	}
+	if c.Last == nil || c.Last.Stats.EvalCount != 20 || c.Last.Stats.TokensPerSecond() != 50 || c.Last.Stats.TotalDuration != time.Second {
+		t.Fatalf("stats not parsed/saved: %+v", c.Last)
 	}
 }

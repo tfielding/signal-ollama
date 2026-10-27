@@ -81,7 +81,7 @@ func (b *Bot) Handle(env signal.Envelope) {
 func (b *Bot) Wait() { b.workers.Wait() }
 
 // accept applies the boundaries: direct text messages from allowed senders only.
-// Group messages (e.g. the family security group), sync messages (our own
+// Messages in group chats, sync messages (our own
 // outgoing alerts), receipts and typing events are all ignored.
 func (b *Bot) accept(env signal.Envelope) (sender, text string, ok bool) {
 	dm := env.DataMessage
@@ -100,7 +100,7 @@ func (b *Bot) accept(env signal.Envelope) (sender, text string, ok bool) {
 		return "", "", false
 	}
 	if !b.opt.Allowed[sender] && !b.opt.Allowed[env.SourceUUID] {
-		slog.Info("ignoring message from sender not on allowlist", "sender", sender)
+		slog.Info("ignoring message from sender not on allowlist", "from", mask(sender))
 		return "", "", false
 	}
 	return sender, text, true
@@ -113,13 +113,21 @@ func (b *Bot) worker(sender string, q chan string) {
 		case <-b.ctx.Done():
 			return
 		case text := <-q:
+			start := time.Now()
+			kind := "chat"
+			if strings.HasPrefix(text, "/") {
+				kind = "command"
+			}
+			slog.Info("message received", "from", mask(sender), "kind", kind, "chars", len(text), "queued", len(q))
 			reply := b.respond(sender, text)
 			if reply == "" {
 				continue
 			}
 			if err := b.msg.Send(b.ctx, sender, reply); err != nil {
-				slog.Error("send failed", "err", err)
+				slog.Error("send failed", "to", mask(sender), "err", err)
+				continue
 			}
+			slog.Info("reply sent", "to", mask(sender), "chars", len(reply), "took", time.Since(start).Round(100*time.Millisecond))
 		}
 	}
 }
@@ -145,13 +153,16 @@ func (b *Bot) respond(sender, text string) string {
 	msgs = append(msgs, chat.History...)
 	msgs = append(msgs, ollama.Message{Role: "user", Content: text})
 
+	slog.Info("asking model", "model", model, "history", len(chat.History))
+	start := time.Now()
 	stopTyping := b.typing(sender)
 	reply, err := b.llm.Chat(b.ctx, model, msgs)
 	stopTyping()
 	if err != nil {
-		slog.Error("ollama chat", "model", model, "err", err)
+		slog.Error("ollama chat", "model", model, "took", time.Since(start).Round(100*time.Millisecond), "err", err)
 		return "Model error: " + err.Error()
 	}
+	slog.Info("model replied", "model", model, "took", time.Since(start).Round(100*time.Millisecond))
 	if reply == "" {
 		reply = "(empty reply)"
 	}
@@ -175,7 +186,7 @@ func (b *Bot) typing(to string) (stop func()) {
 		defer t.Stop()
 		for {
 			if err := b.msg.Typing(b.ctx, to, true); err != nil {
-				slog.Debug("typing indicator", "err", err)
+				slog.Warn("typing indicator failed", "err", err)
 			}
 			select {
 			case <-done:
@@ -266,6 +277,14 @@ func match(models []string, want string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// mask hides all but the last 4 characters of a phone number in logs.
+func mask(s string) string {
+	if len(s) <= 4 {
+		return s
+	}
+	return "…" + s[len(s)-4:]
 }
 
 // trim keeps the newest limit messages, starting on a user turn.

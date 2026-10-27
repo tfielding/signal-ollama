@@ -26,16 +26,42 @@ func New(baseURL string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, http: &http.Client{Timeout: timeout}}
 }
 
+// Stats are the timings Ollama reports with each reply (durations are nanoseconds in JSON).
+type Stats struct {
+	TotalDuration      time.Duration `json:"total_duration"`
+	LoadDuration       time.Duration `json:"load_duration"`
+	PromptEvalCount    int           `json:"prompt_eval_count"`
+	PromptEvalDuration time.Duration `json:"prompt_eval_duration"`
+	EvalCount          int           `json:"eval_count"`
+	EvalDuration       time.Duration `json:"eval_duration"`
+}
+
+func (s Stats) TokensPerSecond() float64       { return rate(s.EvalCount, s.EvalDuration) }
+func (s Stats) PromptTokensPerSecond() float64 { return rate(s.PromptEvalCount, s.PromptEvalDuration) }
+
+func rate(n int, d time.Duration) float64 {
+	if d <= 0 {
+		return 0
+	}
+	return float64(n) / d.Seconds()
+}
+
+type Result struct {
+	Content string
+	Stats   Stats
+}
+
 // Chat sends the conversation and returns the assistant's reply.
-func (c *Client) Chat(ctx context.Context, model string, msgs []Message) (string, error) {
+func (c *Client) Chat(ctx context.Context, model string, msgs []Message) (Result, error) {
 	body, _ := json.Marshal(map[string]any{"model": model, "messages": msgs, "stream": false})
 	var out struct {
 		Message Message `json:"message"`
+		Stats
 	}
 	if err := c.do(ctx, http.MethodPost, "/api/chat", body, &out); err != nil {
-		return "", err
+		return Result{}, err
 	}
-	return strings.TrimSpace(out.Message.Content), nil
+	return Result{Content: strings.TrimSpace(out.Message.Content), Stats: out.Stats}, nil
 }
 
 // Models lists the models installed on the Ollama server.

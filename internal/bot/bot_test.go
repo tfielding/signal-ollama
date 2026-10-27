@@ -43,13 +43,21 @@ type fakeLLM struct {
 	mu    sync.Mutex
 	last  []ollama.Message
 	model string
+	gate  chan struct{} // if set, Chat blocks until it's closed
 }
 
-func (f *fakeLLM) Chat(_ context.Context, model string, msgs []ollama.Message) (string, error) {
+func (f *fakeLLM) Chat(_ context.Context, model string, msgs []ollama.Message) (ollama.Result, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.last, f.model = msgs, model
-	return "echo: " + msgs[len(msgs)-1].Content, nil
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	return ollama.Result{
+		Content: "echo: " + msgs[len(msgs)-1].Content,
+		Stats:   ollama.Stats{EvalCount: 100, EvalDuration: 2 * time.Second, PromptEvalCount: 50, PromptEvalDuration: 500 * time.Millisecond, TotalDuration: 3 * time.Second},
+	}, nil
 }
 func (f *fakeLLM) Models(context.Context) ([]string, error) {
 	return []string{"llama3.2:latest", "qwen2.5:7b"}, nil
@@ -198,5 +206,59 @@ func TestTypingIndicator(t *testing.T) {
 	defer m.mu.Unlock()
 	if len(m.typing) < 2 || !m.typing[0] || m.typing[len(m.typing)-1] {
 		t.Fatalf("typing sequence: %v", m.typing)
+	}
+}
+
+func TestStatusAnswersMidReply(t *testing.T) {
+	b, m, l, _ := setup(t)
+	b.Handle(dm(me, "/status"))
+	if r := reply(t, m); !strings.Contains(r, "Now: idle") {
+		t.Fatalf("idle status: %q", r)
+	}
+
+	gate := make(chan struct{})
+	l.mu.Lock()
+	l.gate = gate
+	l.mu.Unlock()
+	b.Handle(dm(me, "slow question"))
+	b.Handle(dm(me, "second question"))
+	// wait until the model call has started
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b.mu.Lock()
+		_, busy := b.active[me]
+		b.mu.Unlock()
+		if busy || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	b.Handle(dm(me, "/status"))
+	r := reply(t, m) // must arrive while the model is still blocked
+	if !strings.Contains(r, "Now: llama3.2:latest thinking for") || !strings.Contains(r, "1 message(s) waiting") {
+		t.Fatalf("busy status: %q", r)
+	}
+	close(gate)
+	if r := reply(t, m); r != "echo: slow question" {
+		t.Fatalf("got %q", r)
+	}
+	reply(t, m)
+}
+
+func TestStats(t *testing.T) {
+	b, m, _, _ := setup(t)
+	b.Handle(dm(me, "/stats"))
+	if r := reply(t, m); r != "No replies yet." {
+		t.Fatalf("got %q", r)
+	}
+	b.Handle(dm(me, "hello"))
+	reply(t, m)
+	b.Handle(dm(me, "/stats"))
+	r := reply(t, m)
+	for _, want := range []string{"Last reply: llama3.2:latest", "Output: 100 tokens at 50.0 tok/s (2s)", "Prompt: 50 tokens at 100 tok/s", "Total: 3s"} {
+		if !strings.Contains(r, want) {
+			t.Fatalf("missing %q in %q", want, r)
+		}
 	}
 }
