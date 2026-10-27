@@ -56,6 +56,7 @@ type Bot struct {
 type activity struct {
 	model   string
 	started time.Time
+	cancel  context.CancelFunc // stops this model call (/stop)
 }
 
 func New(ctx context.Context, m Messenger, l LLM, s *store.Store, opt Options) *Bot {
@@ -173,7 +174,7 @@ func (b *Bot) send(to, reply string, fromModel bool) error {
 
 func instant(text string) bool {
 	f := strings.Fields(strings.ToLower(text))
-	return len(f) > 0 && (f[0] == "/status" || f[0] == "/stats")
+	return len(f) > 0 && (f[0] == "/status" || f[0] == "/stats" || f[0] == "/stop")
 }
 
 // respond returns the reply and whether it came from the model (Markdown) rather than a command.
@@ -208,14 +209,21 @@ func (b *Bot) respond(sender, text string) (string, bool) {
 	slog.Info("asking model", "model", model, "history", len(chat.History), "think", chat.Think)
 	start := time.Now()
 	b.mu.Lock()
-	b.active[sender] = activity{model: model, started: start}
+	callCtx, cancel := context.WithCancel(b.ctx)
+	defer cancel()
+	b.active[sender] = activity{model: model, started: start, cancel: cancel}
 	b.mu.Unlock()
 	stopTyping := b.typing(sender)
-	res, err := b.llm.Chat(b.ctx, model, msgs, think)
+	res, err := b.llm.Chat(callCtx, model, msgs, think)
 	stopTyping()
 	b.mu.Lock()
 	delete(b.active, sender)
 	b.mu.Unlock()
+	if err != nil && callCtx.Err() != nil && b.ctx.Err() == nil {
+		// Cancelled by /stop, which already replied. Nothing is saved.
+		slog.Info("model call stopped", "model", model, "took", time.Since(start).Round(100*time.Millisecond))
+		return "", false
+	}
 	if err != nil {
 		slog.Error("ollama chat", "model", model, "took", time.Since(start).Round(100*time.Millisecond), "err", err)
 		if unreachable(err) {
@@ -296,6 +304,8 @@ func (b *Bot) command(sender string, chat *store.Chat, text string) string {
 			current, thinking, len(chat.History), b.opt.HistoryLimit, ollamaState, b.now(sender))
 	case "/think":
 		return b.thinkCommand(sender, chat, current, args)
+	case "/stop":
+		return b.stop(sender)
 	case "/stats":
 		return statsText(chat.Last)
 	case "/model":
@@ -345,6 +355,7 @@ const helpText = `Commands:
 /reset - clear conversation memory
 /status - model, memory, and what's running now
 /think - show or change reasoning (on, off, low, medium, high, default)
+/stop - cancel the reply in progress (and anything waiting)
 /stats - speed of the last reply
 /help - this message`
 
@@ -352,8 +363,42 @@ const offlineText = "Can't reach Ollama right now. The machine running it may be
 
 // unreachable reports whether err means Ollama couldn't be contacted (as opposed to a slow or failed reply).
 func unreachable(err error) bool {
-	var ne net.Error
-	return errors.As(err, &ne) && !ne.Timeout()
+	var oe *net.OpError
+	return errors.As(err, &oe) && !oe.Timeout()
+}
+
+// stop cancels the model call in progress for sender and drops queued messages.
+func (b *Bot) stop(sender string) string {
+	b.mu.Lock()
+	a, busy := b.active[sender]
+	q := b.queues[sender]
+	b.mu.Unlock()
+
+	dropped := 0
+	if q != nil {
+	drain:
+		for {
+			select {
+			case <-q:
+				dropped++
+			default:
+				break drain
+			}
+		}
+	}
+	if busy {
+		a.cancel()
+	}
+
+	switch {
+	case busy && dropped > 0:
+		return fmt.Sprintf("Stopped, and dropped %d waiting message(s).", dropped)
+	case busy:
+		return "Stopped."
+	case dropped > 0:
+		return fmt.Sprintf("Dropped %d waiting message(s).", dropped)
+	}
+	return "Nothing is running."
 }
 
 func short(err error) string {

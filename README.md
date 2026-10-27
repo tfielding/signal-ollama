@@ -27,7 +27,7 @@ use the same signal-cli-rest-api account to *send* (alerts etc.) are unaffected.
 - Per-chat conversation memory, saved to disk (`DATA_DIR`), last `HISTORY_LIMIT` messages
 - Typing indicator while the model is thinking
 - Markdown from the model is converted to Signal formatting (bold, italic, monospace); headings become bold lines, tables become label/value lines
-- Commands: `/model`, `/model <name>`, `/reset`, `/status` (model, thinking, memory, whether Ollama is online, what is running now; answers instantly even mid-reply), `/think` (reasoning on/off or low/medium/high, per chat), `/stats` (speed of the last reply), `/help`
+- Commands: `/model`, `/model <name>`, `/reset`, `/status` (model, thinking, memory, whether Ollama is online, what is running now; answers instantly even mid-reply), `/think` (reasoning on/off or low/medium/high, per chat), `/stop` (cancel the reply in progress and anything waiting), `/stats` (speed of the last reply), `/help`
 - Messages from one person are answered in order; different people don't block each other
 - Reconnects to Signal automatically
 - If Ollama is unreachable (e.g. the machine is asleep), replies right away saying so instead of waiting for a timeout

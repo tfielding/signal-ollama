@@ -3,6 +3,7 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -77,5 +78,30 @@ func TestPingFailsFast(t *testing.T) {
 	}
 	if time.Since(start) > 4*time.Second {
 		t.Fatal("ping too slow")
+	}
+}
+
+func TestChatCancel(t *testing.T) {
+	aborted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)   // like Ollama, read the request first
+		<-r.Context().Done() // a slow generation; ends when the client goes away
+		close(aborted)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	start := time.Now()
+	if _, err := c.Chat(ctx, "m", nil, nil); err == nil {
+		t.Fatal("expected error")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("cancel did not abort the request")
+	}
+	select {
+	case <-aborted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never saw the request end")
 	}
 }

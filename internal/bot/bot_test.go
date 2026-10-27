@@ -54,14 +54,18 @@ type fakeLLM struct {
 	chatErr error
 }
 
-func (f *fakeLLM) Chat(_ context.Context, model string, msgs []ollama.Message, think any) (ollama.Result, error) {
+func (f *fakeLLM) Chat(ctx context.Context, model string, msgs []ollama.Message, think any) (ollama.Result, error) {
 	f.mu.Lock()
 	f.last, f.model, f.think = msgs, model, think
 	f.calls++
 	gate, chatErr := f.gate, f.chatErr
 	f.mu.Unlock()
 	if gate != nil {
-		<-gate
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ollama.Result{}, ctx.Err()
+		}
 	}
 	if chatErr != nil {
 		return ollama.Result{}, chatErr
@@ -390,4 +394,54 @@ func TestThink(t *testing.T) {
 	if l.think != nil {
 		t.Fatalf("default sent %#v", l.think)
 	}
+}
+
+func TestStop(t *testing.T) {
+	b, m, l, st := setup(t)
+	b.Handle(dm(me, "/stop"))
+	if r := reply(t, m); r != "Nothing is running." {
+		t.Fatalf("idle: %q", r)
+	}
+
+	gate := make(chan struct{})
+	l.mu.Lock()
+	l.gate = gate
+	l.mu.Unlock()
+	b.Handle(dm(me, "long question"))
+	b.Handle(dm(me, "queued question"))
+	waitBusy(t, b, me)
+
+	b.Handle(dm(me, "/stop"))
+	if r := reply(t, m); r != "Stopped, and dropped 1 waiting message(s)." {
+		t.Fatalf("stop: %q", r)
+	}
+	expectSilence(t, m) // no reply for the stopped or dropped message
+	if c, _ := st.Load(me); len(c.History) != 0 {
+		t.Fatalf("stopped exchange was saved: %+v", c.History)
+	}
+
+	// The bot keeps working afterwards.
+	l.mu.Lock()
+	l.gate = nil
+	l.mu.Unlock()
+	b.Handle(dm(me, "hello again"))
+	if r := reply(t, m); r != "echo: hello again" {
+		t.Fatalf("after stop: %q", r)
+	}
+	close(gate)
+}
+
+func waitBusy(t *testing.T, b *Bot, sender string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		b.mu.Lock()
+		_, busy := b.active[sender]
+		b.mu.Unlock()
+		if busy {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("model call never started")
 }
