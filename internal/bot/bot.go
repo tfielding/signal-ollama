@@ -3,8 +3,10 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -23,8 +25,10 @@ type Messenger interface {
 
 // LLM is the model side (implemented by ollama.Client).
 type LLM interface {
-	Chat(ctx context.Context, model string, msgs []ollama.Message) (ollama.Result, error)
+	Chat(ctx context.Context, model string, msgs []ollama.Message, think any) (ollama.Result, error)
 	Models(ctx context.Context) ([]string, error)
+	Ping(ctx context.Context) error
+	Think(ctx context.Context, model string) (ollama.ThinkInfo, error)
 }
 
 type Options struct {
@@ -194,19 +198,29 @@ func (b *Bot) respond(sender, text string) (string, bool) {
 	msgs = append(msgs, chat.History...)
 	msgs = append(msgs, ollama.Message{Role: "user", Content: text})
 
-	slog.Info("asking model", "model", model, "history", len(chat.History))
+	// Fail fast with a clear message if Ollama is down (e.g. the machine is asleep).
+	if err := b.llm.Ping(b.ctx); err != nil {
+		slog.Warn("ollama unreachable", "err", err)
+		return offlineText, false
+	}
+	think := b.thinkValue(model, chat.Think)
+
+	slog.Info("asking model", "model", model, "history", len(chat.History), "think", chat.Think)
 	start := time.Now()
 	b.mu.Lock()
 	b.active[sender] = activity{model: model, started: start}
 	b.mu.Unlock()
 	stopTyping := b.typing(sender)
-	res, err := b.llm.Chat(b.ctx, model, msgs)
+	res, err := b.llm.Chat(b.ctx, model, msgs, think)
 	stopTyping()
 	b.mu.Lock()
 	delete(b.active, sender)
 	b.mu.Unlock()
 	if err != nil {
 		slog.Error("ollama chat", "model", model, "took", time.Since(start).Round(100*time.Millisecond), "err", err)
+		if unreachable(err) {
+			return offlineText, false
+		}
 		return "Model error: " + err.Error(), false
 	}
 	slog.Info("model replied", "model", model, "took", time.Since(start).Round(100*time.Millisecond),
@@ -271,8 +285,17 @@ func (b *Bot) command(sender string, chat *store.Chat, text string) string {
 		}
 		return "History cleared."
 	case "/status":
-		return fmt.Sprintf("Model: %s\nMemory: %d messages (max %d)\nNow: %s",
-			current, len(chat.History), b.opt.HistoryLimit, b.now(sender))
+		ollamaState := "online"
+		thinking := "unknown (Ollama offline)"
+		if err := b.llm.Ping(b.ctx); err != nil {
+			ollamaState = "offline (" + short(err) + ")"
+		} else if info, err := b.llm.Think(b.ctx, current); err == nil {
+			thinking = thinkLabel(chat.Think, info)
+		}
+		return fmt.Sprintf("Model: %s\nThinking: %s\nMemory: %d messages (max %d)\nOllama: %s\nNow: %s",
+			current, thinking, len(chat.History), b.opt.HistoryLimit, ollamaState, b.now(sender))
+	case "/think":
+		return b.thinkCommand(sender, chat, current, args)
 	case "/stats":
 		return statsText(chat.Last)
 	case "/model":
@@ -304,7 +327,13 @@ func (b *Bot) command(sender string, chat *store.Chat, text string) string {
 		if err := b.store.Save(sender, *chat); err != nil {
 			return "Couldn't save: " + err.Error()
 		}
-		return "Switched to " + name + "."
+		msg := "Switched to " + name + "."
+		if chat.Think != "" {
+			if info, err := b.llm.Think(b.ctx, name); err == nil && info.Known && !info.Supports(chat.Think) {
+				msg += fmt.Sprintf("\nIt doesn't support thinking %q, so it will use its default. Options: %s", chat.Think, options(info))
+			}
+		}
+		return msg
 	default:
 		return "Unknown command. " + helpText
 	}
@@ -315,8 +344,93 @@ const helpText = `Commands:
 /model <name> - switch model
 /reset - clear conversation memory
 /status - model, memory, and what's running now
+/think - show or change reasoning (on, off, low, medium, high, default)
 /stats - speed of the last reply
 /help - this message`
+
+const offlineText = "Can't reach Ollama right now. The machine running it may be asleep or offline. Try again in a bit."
+
+// unreachable reports whether err means Ollama couldn't be contacted (as opposed to a slow or failed reply).
+func unreachable(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && !ne.Timeout()
+}
+
+func short(err error) string {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timed out"
+	}
+	var oe *net.OpError
+	if errors.As(err, &oe) && oe.Err != nil {
+		return oe.Err.Error()
+	}
+	return err.Error()
+}
+
+// thinkValue returns the API value for a chat's thinking setting, or nil (model default)
+// if it's unset or the model doesn't support it.
+func (b *Bot) thinkValue(model, setting string) any {
+	if setting == "" {
+		return nil
+	}
+	if info, err := b.llm.Think(b.ctx, model); err == nil && info.Known && !info.Supports(setting) {
+		slog.Info("thinking setting not supported by model, using default", "model", model, "think", setting)
+		return nil
+	}
+	return ollama.ThinkValue(setting)
+}
+
+func (b *Bot) thinkCommand(sender string, chat *store.Chat, model string, args []string) string {
+	info, err := b.llm.Think(b.ctx, model)
+	if err != nil {
+		if unreachable(err) {
+			return offlineText
+		}
+		return "Couldn't check the model: " + err.Error()
+	}
+	if len(args) == 0 {
+		return fmt.Sprintf("Thinking: %s\nOptions for %s: %s\nChange with /think <option>", thinkLabel(chat.Think, info), model, options(info))
+	}
+
+	v := strings.ToLower(args[0])
+	switch {
+	case v == "default":
+		v = ""
+	case info.Known && !info.Supports(v):
+		if len(info.Values) == 1 && info.Values[0] == "off" {
+			return model + " doesn't support thinking."
+		}
+		return fmt.Sprintf("%s doesn't support %q. Options: %s", model, v, options(info))
+	case !info.Known && v != "on" && v != "off" && v != "low" && v != "medium" && v != "high":
+		return fmt.Sprintf("Unknown option %q. Options: %s", v, options(info))
+	}
+	chat.Think = v
+	if err := b.store.Save(sender, *chat); err != nil {
+		return "Couldn't save: " + err.Error()
+	}
+	return "Thinking: " + thinkLabel(v, info) + "."
+}
+
+func options(info ollama.ThinkInfo) string {
+	if !info.Known {
+		return "on, off, default"
+	}
+	return strings.Join(info.Values, ", ") + ", default"
+}
+
+func thinkLabel(setting string, info ollama.ThinkInfo) string {
+	if setting == "" {
+		if info.Default != "" {
+			return "model default (" + info.Default + ")"
+		}
+		return "model default"
+	}
+	if info.Known && !info.Supports(setting) {
+		return setting + " (not supported by this model, using its default)"
+	}
+	return setting
+}
 
 // now describes what the bot is doing for sender right now.
 func (b *Bot) now(sender string) string {

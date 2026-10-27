@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"errors"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -42,19 +44,27 @@ func (f *fakeMsg) Typing(_ context.Context, _ string, on bool) error {
 }
 
 type fakeLLM struct {
-	mu    sync.Mutex
-	last  []ollama.Message
-	model string
-	gate  chan struct{} // if set, Chat blocks until it's closed
+	mu      sync.Mutex
+	last    []ollama.Message
+	model   string
+	think   any
+	calls   int
+	gate    chan struct{} // if set, Chat blocks until it's closed
+	pingErr error
+	chatErr error
 }
 
-func (f *fakeLLM) Chat(_ context.Context, model string, msgs []ollama.Message) (ollama.Result, error) {
+func (f *fakeLLM) Chat(_ context.Context, model string, msgs []ollama.Message, think any) (ollama.Result, error) {
 	f.mu.Lock()
-	f.last, f.model = msgs, model
-	gate := f.gate
+	f.last, f.model, f.think = msgs, model, think
+	f.calls++
+	gate, chatErr := f.gate, f.chatErr
 	f.mu.Unlock()
 	if gate != nil {
 		<-gate
+	}
+	if chatErr != nil {
+		return ollama.Result{}, chatErr
 	}
 	return ollama.Result{
 		Content: "echo: " + msgs[len(msgs)-1].Content,
@@ -62,7 +72,26 @@ func (f *fakeLLM) Chat(_ context.Context, model string, msgs []ollama.Message) (
 	}, nil
 }
 func (f *fakeLLM) Models(context.Context) ([]string, error) {
-	return []string{"llama3.2:latest", "qwen2.5:7b"}, nil
+	return []string{"llama3.2:latest", "qwen2.5:7b", "gpt-oss:20b"}, nil
+}
+func (f *fakeLLM) Ping(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pingErr
+}
+func (f *fakeLLM) Think(_ context.Context, model string) (ollama.ThinkInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pingErr != nil {
+		return ollama.ThinkInfo{}, f.pingErr
+	}
+	switch model {
+	case "qwen2.5:7b":
+		return ollama.ThinkInfo{Known: true, Values: []string{"on", "off"}, Default: "on"}, nil
+	case "gpt-oss:20b":
+		return ollama.ThinkInfo{Known: true, Values: []string{"low", "medium", "high"}, Default: "medium"}, nil
+	}
+	return ollama.ThinkInfo{}, nil // no metadata
 }
 
 func setup(t *testing.T) (*Bot, *fakeMsg, *fakeLLM, *store.Store) {
@@ -277,5 +306,88 @@ func TestModelRepliesStyledCommandsPlain(t *testing.T) {
 	defer m.mu.Unlock()
 	if !m.styled[0] || m.styled[1] {
 		t.Fatalf("styled flags: %v", m.styled)
+	}
+}
+
+var refused = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
+
+func TestOllamaOffline(t *testing.T) {
+	b, m, l, st := setup(t)
+	l.pingErr = refused
+	b.Handle(dm(me, "hello"))
+	if r := reply(t, m); r != offlineText {
+		t.Fatalf("got %q", r)
+	}
+	if l.calls != 0 {
+		t.Fatal("should not call the model when offline")
+	}
+	if c, _ := st.Load(me); len(c.History) != 0 {
+		t.Fatal("offline message should not be saved")
+	}
+	b.Handle(dm(me, "/status"))
+	if r := reply(t, m); !strings.Contains(r, "Ollama: offline (connect: connection refused)") {
+		t.Fatalf("status: %q", r)
+	}
+
+	// Goes away mid-reply.
+	l.mu.Lock()
+	l.pingErr, l.chatErr = nil, refused
+	l.mu.Unlock()
+	b.Handle(dm(me, "hello"))
+	if r := reply(t, m); r != offlineText {
+		t.Fatalf("mid-reply: %q", r)
+	}
+}
+
+func TestThink(t *testing.T) {
+	b, m, l, st := setup(t)
+	send := func(text string) string { b.Handle(dm(me, text)); return reply(t, m) }
+
+	// Default model has no thinking metadata: generic options.
+	if r := send("/think"); !strings.Contains(r, "Thinking: model default") || !strings.Contains(r, "on, off, default") {
+		t.Fatalf("think (unknown): %q", r)
+	}
+	send("/model qwen2.5:7b")
+	if r := send("/think"); !strings.Contains(r, "model default (on)") || !strings.Contains(r, "Options for qwen2.5:7b: on, off, default") {
+		t.Fatalf("think (qwen): %q", r)
+	}
+	if r := send("/think off"); r != "Thinking: off." {
+		t.Fatalf("set off: %q", r)
+	}
+	send("hi")
+	if l.think != false {
+		t.Fatalf("think sent = %#v", l.think)
+	}
+	if c, _ := st.Load(me); c.Think != "off" {
+		t.Fatal("think not persisted")
+	}
+
+	// gpt-oss only has levels: switching warns, and the unsupported setting isn't sent.
+	if r := send("/model gpt-oss:20b"); !strings.Contains(r, `doesn't support thinking "off"`) {
+		t.Fatalf("switch warning: %q", r)
+	}
+	send("hi")
+	if l.think != nil {
+		t.Fatalf("unsupported setting sent: %#v", l.think)
+	}
+	if r := send("/think off"); !strings.Contains(r, `doesn't support "off". Options: low, medium, high, default`) {
+		t.Fatalf("reject off: %q", r)
+	}
+	if r := send("/think low"); r != "Thinking: low." {
+		t.Fatalf("set low: %q", r)
+	}
+	send("hi")
+	if l.think != "low" {
+		t.Fatalf("think sent = %#v", l.think)
+	}
+	if r := send("/status"); !strings.Contains(r, "Thinking: low") || !strings.Contains(r, "Ollama: online") {
+		t.Fatalf("status: %q", r)
+	}
+	if r := send("/think default"); r != "Thinking: model default (medium)." {
+		t.Fatalf("default: %q", r)
+	}
+	send("hi")
+	if l.think != nil {
+		t.Fatalf("default sent %#v", l.think)
 	}
 }

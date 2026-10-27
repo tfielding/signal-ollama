@@ -84,6 +84,10 @@ func TestEndToEnd(t *testing.T) {
 				"message":    map[string]string{"role": "assistant", "content": " 4 "},
 				"eval_count": 20, "eval_duration": 400_000_000, "total_duration": 1_000_000_000,
 			})
+		case "/api/version":
+			json.NewEncoder(w).Encode(map[string]string{"version": "test"})
+		case "/api/show":
+			json.NewEncoder(w).Encode(map[string]any{})
 		case "/api/tags":
 			json.NewEncoder(w).Encode(map[string]any{"models": []map[string]string{{"name": "llama3.2:latest"}}})
 		}

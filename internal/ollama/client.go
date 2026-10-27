@@ -52,8 +52,13 @@ type Result struct {
 }
 
 // Chat sends the conversation and returns the assistant's reply.
-func (c *Client) Chat(ctx context.Context, model string, msgs []Message) (Result, error) {
-	body, _ := json.Marshal(map[string]any{"model": model, "messages": msgs, "stream": false})
+// think is nil (model default), a bool, or a level string such as "low".
+func (c *Client) Chat(ctx context.Context, model string, msgs []Message, think any) (Result, error) {
+	req := map[string]any{"model": model, "messages": msgs, "stream": false}
+	if think != nil {
+		req["think"] = think
+	}
+	body, _ := json.Marshal(req)
 	var out struct {
 		Message Message `json:"message"`
 		Stats
@@ -62,6 +67,86 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message) (Result
 		return Result{}, err
 	}
 	return Result{Content: strings.TrimSpace(out.Message.Content), Stats: out.Stats}, nil
+}
+
+// Ping checks that Ollama is reachable, failing fast (it doesn't wait for a model).
+func (c *Client) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var out struct {
+		Version string `json:"version"`
+	}
+	return c.do(ctx, http.MethodGet, "/api/version", nil, &out)
+}
+
+// ThinkInfo describes a model's thinking options, from /api/show.
+// Values use "on"/"off" for true/false and keep level names (e.g. "low") as-is.
+type ThinkInfo struct {
+	Known   bool // false if Ollama didn't report thinking metadata for this model
+	Values  []string
+	Default string
+}
+
+func (t ThinkInfo) Supports(v string) bool {
+	for _, x := range t.Values {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Think returns the thinking options for model.
+func (c *Client) Think(ctx context.Context, model string) (ThinkInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]string{"model": model})
+	var out struct {
+		Thinking *struct {
+			Values  []any `json:"values"`
+			Default any   `json:"default"`
+		} `json:"thinking"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/show", body, &out); err != nil {
+		return ThinkInfo{}, err
+	}
+	if out.Thinking == nil {
+		return ThinkInfo{}, nil
+	}
+	info := ThinkInfo{Default: thinkName(out.Thinking.Default)}
+	for _, v := range out.Thinking.Values {
+		if n := thinkName(v); n != "" {
+			info.Values = append(info.Values, n)
+		}
+	}
+	info.Known = len(info.Values) > 0
+	return info, nil
+}
+
+func thinkName(v any) string {
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return "on"
+		}
+		return "off"
+	case string:
+		return x
+	}
+	return ""
+}
+
+// ThinkValue converts a setting ("on", "off", "low", ...) to the API value; "" means model default.
+func ThinkValue(setting string) any {
+	switch setting {
+	case "":
+		return nil
+	case "on":
+		return true
+	case "off":
+		return false
+	}
+	return setting
 }
 
 // Models lists the models installed on the Ollama server.
