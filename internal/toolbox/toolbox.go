@@ -12,15 +12,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
-	refreshEvery  = time.Minute
-	listTimeout   = 5 * time.Second // don't hold up a reply for a server that's down
-	callTimeout   = 60 * time.Second
-	maxResultText = 8000
+	refreshEvery = time.Minute
+	listTimeout  = 5 * time.Second // don't hold up a reply for a server that's down
+	callTimeout  = 60 * time.Second
+	// DefaultMaxResultChars caps tool output given to the model (about 8k tokens).
+	DefaultMaxResultChars = 32000
 )
 
 // Server is one MCP server (Streamable HTTP).
@@ -48,15 +50,17 @@ type Image struct {
 
 // Output is a tool result, reduced to what the bot needs.
 type Output struct {
-	Text    string
-	Images  []Image
-	IsError bool
-	Dropped []string // arguments removed because the tool doesn't accept them
+	Text      string
+	Images    []Image
+	IsError   bool
+	Dropped   []string // arguments removed because the tool doesn't accept them
+	Truncated int      // characters cut from Text (0 = complete)
 }
 
 type Options struct {
-	Allowed    map[string]bool // if non-empty, only these tool names are exposed
-	AllowWrite bool            // expose tools that aren't marked read-only
+	Allowed        map[string]bool // if non-empty, only these tool names are exposed
+	AllowWrite     bool            // expose tools that aren't marked read-only
+	MaxResultChars int             // 0 = DefaultMaxResultChars
 }
 
 type Box struct {
@@ -152,7 +156,7 @@ func (b *Box) Call(ctx context.Context, name string, args map[string]any) (Outpu
 	if err != nil {
 		return Output{Dropped: dropped}, err
 	}
-	out := convert(res)
+	out := convert(res, b.maxChars())
 	out.Dropped = dropped
 	return out, nil
 }
@@ -203,22 +207,55 @@ func emptyObject(raw []byte) bool {
 	return s["type"] == "object" && !hasProps
 }
 
-func convert(res *mcp.CallToolResult) Output {
+func (b *Box) maxChars() int {
+	if b.opt.MaxResultChars > 0 {
+		return b.opt.MaxResultChars
+	}
+	return DefaultMaxResultChars
+}
+
+func convert(res *mcp.CallToolResult, max int) Output {
 	out := Output{IsError: res.IsError}
 	var text []string
 	for _, c := range res.Content {
 		switch v := c.(type) {
 		case *mcp.TextContent:
-			text = append(text, v.Text)
+			text = append(text, unwrap(v.Text))
 		case *mcp.ImageContent:
 			out.Images = append(out.Images, Image{MIME: v.MIMEType, Data: v.Data})
 		}
 	}
 	out.Text = strings.Join(text, "\n")
-	if len(out.Text) > maxResultText {
-		out.Text = out.Text[:maxResultText] + "\n…(truncated)"
+	if len(out.Text) > max {
+		out.Truncated = len(out.Text) - max
+		cut := max
+		for cut > 0 && !utf8.RuneStart(out.Text[cut]) {
+			cut--
+		}
+		out.Text = out.Text[:cut] + fmt.Sprintf("\n…(truncated: %d more characters not shown)", out.Truncated)
 	}
 	return out
+}
+
+// unwrap turns a JSON object holding a single string field, like {"result": "line\nline"},
+// into that string. Some servers double-encode text this way, which hides line breaks
+// as escaped "\n" and costs extra tokens. Anything else is returned unchanged.
+func unwrap(s string) string {
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "{") {
+		return s
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(t), &obj) != nil || len(obj) != 1 {
+		return s
+	}
+	for _, raw := range obj {
+		var inner string
+		if json.Unmarshal(raw, &inner) == nil {
+			return inner
+		}
+	}
+	return s
 }
 
 func (b *Box) list(ctx context.Context, s Server) ([]Tool, error) {

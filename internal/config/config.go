@@ -30,6 +30,7 @@ type Config struct {
 	MCPServers    []toolbox.Server // from MCP_SERVERS=name=url,...; tokens from MCP_TOKEN_<NAME>
 	MCPTools      map[string]bool  // optional allowlist of tool names
 	MCPAllowWrite bool             // expose tools not marked read-only
+	MCPMaxChars   int              // cap on tool output given to the model
 }
 
 func Load() (Config, error) {
@@ -73,6 +74,9 @@ func Load() (Config, error) {
 		if t = strings.TrimSpace(t); t != "" {
 			c.MCPTools[t] = true
 		}
+	}
+	if c.MCPMaxChars, err = strconv.Atoi(env("MCP_MAX_RESULT_CHARS", strconv.Itoa(toolbox.DefaultMaxResultChars))); err != nil || c.MCPMaxChars < 1000 {
+		return c, fmt.Errorf("MCP_MAX_RESULT_CHARS must be an integer >= 1000")
 	}
 	if v := os.Getenv("MCP_ALLOW_WRITE"); v != "" {
 		if c.MCPAllowWrite, err = strconv.ParseBool(v); err != nil {

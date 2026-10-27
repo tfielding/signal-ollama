@@ -48,7 +48,7 @@ func run() error {
 	sc := sig.New(cfg.SignalURL, cfg.SignalNumber)
 	var tools bot.Tools
 	if len(cfg.MCPServers) > 0 {
-		box := toolbox.New(cfg.MCPServers, toolbox.Options{Allowed: cfg.MCPTools, AllowWrite: cfg.MCPAllowWrite})
+		box := toolbox.New(cfg.MCPServers, toolbox.Options{Allowed: cfg.MCPTools, AllowWrite: cfg.MCPAllowWrite, MaxResultChars: cfg.MCPMaxChars})
 		defer box.Close()
 		names := []string{}
 		for _, t := range box.Tools(ctx) {

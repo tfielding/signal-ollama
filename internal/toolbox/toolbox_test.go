@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -48,7 +49,7 @@ func TestCollisionsAllowlistAndDownServer(t *testing.T) {
 		t.Fatal("expected error for down server")
 	}
 	out, err := box.Call(ctx, "b_status", nil)
-	if err != nil || !strings.HasPrefix(out.Text, "b:status:") || !strings.HasSuffix(out.Text, "(truncated)") {
+	if err != nil || !strings.HasPrefix(out.Text, "b:status:") || out.Truncated != 0 {
 		t.Fatalf("call: %q %v", out.Text[:20], err)
 	}
 	if _, err := box.Call(ctx, "nope", nil); err == nil {
@@ -155,5 +156,23 @@ func TestInventedArgsDroppedEndToEnd(t *testing.T) {
 	out, err := box.Call(context.Background(), "GetLiveContext", map[string]any{"area": "Kitchen", "domain": "light"})
 	if err != nil || out.IsError || out.Text != "Kitchen light: on" || strings.Join(out.Dropped, ",") != "area,domain" {
 		t.Fatalf("got %+v err=%v", out, err)
+	}
+}
+
+func TestUnwrapAndTruncate(t *testing.T) {
+	ha := `{"result": "Live Context:\n- names: Basement Door\n  domain: lock\n  state: locked"}`
+	if got := unwrap(ha); got != "Live Context:\n- names: Basement Door\n  domain: lock\n  state: locked" {
+		t.Fatalf("unwrap: %q", got)
+	}
+	for _, keep := range []string{`{"cameras":["a"]}`, `{"a":"x","b":"y"}`, `plain text`, `{"n": 5}`} {
+		if unwrap(keep) != keep {
+			t.Errorf("should be unchanged: %s", keep)
+		}
+	}
+
+	long := strings.Repeat("é", 3000) // 2 bytes each: cut must not split a character
+	out := convert(&mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: long}}}, 1001)
+	if out.Truncated == 0 || !utf8.ValidString(out.Text) || !strings.Contains(out.Text, "more characters not shown") {
+		t.Fatalf("truncate: %d valid=%v", out.Truncated, utf8.ValidString(out.Text))
 	}
 }

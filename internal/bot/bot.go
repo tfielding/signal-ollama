@@ -353,8 +353,12 @@ func (b *Bot) run(ctx context.Context, sender, model string, msgs []ollama.Messa
 			}
 			attrs := []any{"tool", name, "args", argKeys(tc.Function.Arguments), "took", time.Since(start).Round(time.Millisecond),
 				"images", len(out.Images), "is_error", out.IsError}
+			attrs = append(attrs, "chars", len(out.Text))
 			if len(out.Dropped) > 0 {
 				attrs = append(attrs, "dropped_args", out.Dropped)
+			}
+			if out.Truncated > 0 {
+				attrs = append(attrs, "truncated_chars", out.Truncated)
 			}
 			if err != nil {
 				attrs = append(attrs, "err", err)

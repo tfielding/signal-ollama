@@ -57,6 +57,7 @@ use the same signal-cli-rest-api account to *send* (alerts etc.) are unaffected.
 | `MCP_TOKEN_<NAME>` | none | Bearer token for server `<name>` (uppercased, `-` and `.` become `_`), e.g. `MCP_TOKEN_CAMS` |
 | `MCP_TOOLS` | all | Optional allowlist of tool names, e.g. `list_cameras,get_snapshot` |
 | `MCP_ALLOW_WRITE` | `false` | Also expose tools that are not marked read-only |
+| `MCP_MAX_RESULT_CHARS` | `32000` | Max characters of tool output passed to the model (about 8k tokens). Make sure Ollama's context window can hold it |
 
 ## Run
 
