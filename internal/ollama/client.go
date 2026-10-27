@@ -13,8 +13,31 @@ import (
 )
 
 type Message struct {
-	Role    string `json:"role"` // system, user, assistant
-	Content string `json:"content"`
+	Role      string     `json:"role"` // system, user, assistant, tool
+	Content   string     `json:"content"`
+	Thinking  string     `json:"thinking,omitempty"`
+	Images    [][]byte   `json:"images,omitempty"` // sent as base64
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	ToolName  string     `json:"tool_name,omitempty"` // on role "tool" messages
+}
+
+// Tool is a function the model may call.
+type Tool struct {
+	Type     string       `json:"type"` // "function"
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters"`
+}
+
+type ToolCall struct {
+	Function struct {
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	} `json:"function"`
 }
 
 type Client struct {
@@ -39,6 +62,16 @@ type Stats struct {
 func (s Stats) TokensPerSecond() float64       { return rate(s.EvalCount, s.EvalDuration) }
 func (s Stats) PromptTokensPerSecond() float64 { return rate(s.PromptEvalCount, s.PromptEvalDuration) }
 
+// Add accumulates another call's stats (for multi-step tool use).
+func (s *Stats) Add(o Stats) {
+	s.TotalDuration += o.TotalDuration
+	s.LoadDuration += o.LoadDuration
+	s.PromptEvalCount += o.PromptEvalCount
+	s.PromptEvalDuration += o.PromptEvalDuration
+	s.EvalCount += o.EvalCount
+	s.EvalDuration += o.EvalDuration
+}
+
 func rate(n int, d time.Duration) float64 {
 	if d <= 0 {
 		return 0
@@ -47,16 +80,22 @@ func rate(n int, d time.Duration) float64 {
 }
 
 type Result struct {
-	Content string
-	Stats   Stats
+	Content   string
+	Thinking  string
+	ToolCalls []ToolCall
+	Stats     Stats
 }
 
 // Chat sends the conversation and returns the assistant's reply.
 // think is nil (model default), a bool, or a level string such as "low".
-func (c *Client) Chat(ctx context.Context, model string, msgs []Message, think any) (Result, error) {
+// tools may be nil; if the reply asks for tool calls they are in Result.ToolCalls.
+func (c *Client) Chat(ctx context.Context, model string, msgs []Message, think any, tools []Tool) (Result, error) {
 	req := map[string]any{"model": model, "messages": msgs, "stream": false}
 	if think != nil {
 		req["think"] = think
+	}
+	if len(tools) > 0 {
+		req["tools"] = tools
 	}
 	body, _ := json.Marshal(req)
 	var out struct {
@@ -66,7 +105,12 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, think a
 	if err := c.do(ctx, http.MethodPost, "/api/chat", body, &out); err != nil {
 		return Result{}, err
 	}
-	return Result{Content: strings.TrimSpace(out.Message.Content), Stats: out.Stats}, nil
+	return Result{
+		Content:   strings.TrimSpace(out.Message.Content),
+		Thinking:  out.Message.Thinking,
+		ToolCalls: out.Message.ToolCalls,
+		Stats:     out.Stats,
+	}, nil
 }
 
 // Ping checks that Ollama is reachable, failing fast (it doesn't wait for a model).
@@ -96,30 +140,47 @@ func (t ThinkInfo) Supports(v string) bool {
 	return false
 }
 
-// Think returns the thinking options for model.
-func (c *Client) Think(ctx context.Context, model string) (ThinkInfo, error) {
+// ModelInfo is what /api/show tells us about a model.
+type ModelInfo struct {
+	Think        ThinkInfo
+	Capabilities []string // e.g. "completion", "tools", "vision", "thinking"
+}
+
+func (m ModelInfo) Has(capability string) bool {
+	for _, c := range m.Capabilities {
+		if c == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// Info returns thinking options and capabilities for model.
+func (c *Client) Info(ctx context.Context, model string) (ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	body, _ := json.Marshal(map[string]string{"model": model})
 	var out struct {
-		Thinking *struct {
+		Capabilities []string `json:"capabilities"`
+		Thinking     *struct {
 			Values  []any `json:"values"`
 			Default any   `json:"default"`
 		} `json:"thinking"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/api/show", body, &out); err != nil {
-		return ThinkInfo{}, err
+		return ModelInfo{}, err
 	}
+	info := ModelInfo{Capabilities: out.Capabilities}
 	if out.Thinking == nil {
-		return ThinkInfo{}, nil
+		return info, nil
 	}
-	info := ThinkInfo{Default: thinkName(out.Thinking.Default)}
+	info.Think.Default = thinkName(out.Thinking.Default)
 	for _, v := range out.Thinking.Values {
 		if n := thinkName(v); n != "" {
-			info.Values = append(info.Values, n)
+			info.Think.Values = append(info.Think.Values, n)
 		}
 	}
-	info.Known = len(info.Values) > 0
+	info.Think.Known = len(info.Think.Values) > 0
 	return info, nil
 }
 

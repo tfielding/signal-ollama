@@ -30,6 +30,7 @@ use the same signal-cli-rest-api account to *send* (alerts etc.) are unaffected.
 - Commands: `/model`, `/model <name>`, `/reset`, `/status` (model, thinking, memory, whether Ollama is online, what is running now; answers instantly even mid-reply), `/think` (reasoning on/off or low/medium/high, per chat), `/stop` (cancel the reply in progress and anything waiting), `/stats` (speed of the last reply), `/help`
 - Messages from one person are answered in order; different people don't block each other
 - Reconnects to Signal automatically
+- Optional tools from MCP servers (e.g. camera snapshots); images that tools return are sent to you as attachments
 - If Ollama is unreachable (e.g. the machine is asleep), replies right away saying so instead of waiting for a timeout
 
 ## Requirements
@@ -52,6 +53,10 @@ use the same signal-cli-rest-api account to *send* (alerts etc.) are unaffected.
 | `SYSTEM_PROMPT` | short, phone-friendly assistant prompt | Overrides the built-in prompt (including its formatting rules) |
 | `OLLAMA_TIMEOUT` | `5m` | |
 | `DATA_DIR` | `/data` | Chat history (one JSON file per chat) |
+| `MCP_SERVERS` | none | MCP servers to get tools from: `name=url,...`, e.g. `cams=http://go2rtc-mcp:8090/mcp` |
+| `MCP_TOKEN_<NAME>` | none | Bearer token for server `<name>` (uppercased, `-` and `.` become `_`), e.g. `MCP_TOKEN_CAMS` |
+| `MCP_TOOLS` | all | Optional allowlist of tool names, e.g. `list_cameras,get_snapshot` |
+| `MCP_ALLOW_WRITE` | `false` | Also expose tools that are not marked read-only |
 
 ## Run
 
@@ -76,6 +81,21 @@ Locally:
 SIGNAL_URL=http://<signal-host>:8080 SIGNAL_NUMBER=+1... ALLOWED_SENDERS=+1... \
 OLLAMA_URL=http://localhost:11434 DATA_DIR=./data go run .
 ```
+
+## Tools (MCP)
+
+signal-ollama can use tools from any [MCP](https://modelcontextprotocol.io) server that speaks
+Streamable HTTP. It has no tool-specific code: point `MCP_SERVERS` at a server and its tools are
+offered to the model.
+
+- Only tools marked **read-only** by the server are offered, unless `MCP_ALLOW_WRITE=true`.
+  Anything that can change things (locks, alarms, settings) stays hidden by default.
+- Tools are only offered to models that support tool calling (Ollama reports this per model).
+- Images returned by a tool are sent to you as Signal attachments with the reply. If the current
+  model supports vision, it sees them too; otherwise it's told an image was sent.
+- The model can make up to 6 rounds of tool calls per message. `/stop` cancels tool calls too.
+- `/status` lists the available tools and any server that's unreachable. Tool lists are refreshed
+  every minute, and sessions reconnect automatically if a server restarts.
 
 ## Notes
 

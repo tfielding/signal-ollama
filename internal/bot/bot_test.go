@@ -28,7 +28,7 @@ type fakeMsg struct {
 	ch     chan string
 }
 
-func (f *fakeMsg) Send(_ context.Context, to, text string, styled bool) error {
+func (f *fakeMsg) Send(_ context.Context, to, text string, styled bool, att []signal.Attachment) error {
 	f.mu.Lock()
 	f.sent = append(f.sent, to+": "+text)
 	f.styled = append(f.styled, styled)
@@ -54,7 +54,7 @@ type fakeLLM struct {
 	chatErr error
 }
 
-func (f *fakeLLM) Chat(ctx context.Context, model string, msgs []ollama.Message, think any) (ollama.Result, error) {
+func (f *fakeLLM) Chat(ctx context.Context, model string, msgs []ollama.Message, think any, tools []ollama.Tool) (ollama.Result, error) {
 	f.mu.Lock()
 	f.last, f.model, f.think = msgs, model, think
 	f.calls++
@@ -83,19 +83,19 @@ func (f *fakeLLM) Ping(context.Context) error {
 	defer f.mu.Unlock()
 	return f.pingErr
 }
-func (f *fakeLLM) Think(_ context.Context, model string) (ollama.ThinkInfo, error) {
+func (f *fakeLLM) Info(_ context.Context, model string) (ollama.ModelInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.pingErr != nil {
-		return ollama.ThinkInfo{}, f.pingErr
+		return ollama.ModelInfo{}, f.pingErr
 	}
 	switch model {
 	case "qwen2.5:7b":
-		return ollama.ThinkInfo{Known: true, Values: []string{"on", "off"}, Default: "on"}, nil
+		return ollama.ModelInfo{Think: ollama.ThinkInfo{Known: true, Values: []string{"on", "off"}, Default: "on"}}, nil
 	case "gpt-oss:20b":
-		return ollama.ThinkInfo{Known: true, Values: []string{"low", "medium", "high"}, Default: "medium"}, nil
+		return ollama.ModelInfo{Think: ollama.ThinkInfo{Known: true, Values: []string{"low", "medium", "high"}, Default: "medium"}}, nil
 	}
-	return ollama.ThinkInfo{}, nil // no metadata
+	return ollama.ModelInfo{}, nil // no metadata
 }
 
 func setup(t *testing.T) (*Bot, *fakeMsg, *fakeLLM, *store.Store) {

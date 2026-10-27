@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"signal-ollama/internal/toolbox"
 )
 
 const defaultSystemPrompt = "You are a helpful assistant chatting over Signal on a phone. " +
@@ -24,6 +26,10 @@ type Config struct {
 	HistoryLimit  int             // max messages (user+assistant) kept per chat
 	SystemPrompt  string
 	OllamaTimeout time.Duration
+
+	MCPServers    []toolbox.Server // from MCP_SERVERS=name=url,...; tokens from MCP_TOKEN_<NAME>
+	MCPTools      map[string]bool  // optional allowlist of tool names
+	MCPAllowWrite bool             // expose tools not marked read-only
 }
 
 func Load() (Config, error) {
@@ -55,6 +61,23 @@ func Load() (Config, error) {
 	}
 	if c.OllamaTimeout, err = time.ParseDuration(env("OLLAMA_TIMEOUT", "5m")); err != nil {
 		return c, fmt.Errorf("OLLAMA_TIMEOUT: %w", err)
+	}
+
+	if c.MCPServers, err = toolbox.ParseServers(os.Getenv("MCP_SERVERS"), func(name string) string {
+		return os.Getenv("MCP_TOKEN_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name)))
+	}); err != nil {
+		return c, err
+	}
+	c.MCPTools = map[string]bool{}
+	for _, t := range strings.Split(os.Getenv("MCP_TOOLS"), ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			c.MCPTools[t] = true
+		}
+	}
+	if v := os.Getenv("MCP_ALLOW_WRITE"); v != "" {
+		if c.MCPAllowWrite, err = strconv.ParseBool(v); err != nil {
+			return c, fmt.Errorf("MCP_ALLOW_WRITE must be true or false")
+		}
 	}
 	return c, nil
 }

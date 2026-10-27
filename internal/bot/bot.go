@@ -15,23 +15,35 @@ import (
 	"signal-ollama/internal/ollama"
 	"signal-ollama/internal/signal"
 	"signal-ollama/internal/store"
+	"signal-ollama/internal/toolbox"
 )
 
 // Messenger is the Signal side (implemented by signal.Client).
 type Messenger interface {
-	Send(ctx context.Context, recipient, text string, styled bool) error
+	Send(ctx context.Context, recipient, text string, styled bool, attachments []signal.Attachment) error
 	Typing(ctx context.Context, recipient string, on bool) error
 }
 
 // LLM is the model side (implemented by ollama.Client).
 type LLM interface {
-	Chat(ctx context.Context, model string, msgs []ollama.Message, think any) (ollama.Result, error)
+	Chat(ctx context.Context, model string, msgs []ollama.Message, think any, tools []ollama.Tool) (ollama.Result, error)
 	Models(ctx context.Context) ([]string, error)
 	Ping(ctx context.Context) error
-	Think(ctx context.Context, model string) (ollama.ThinkInfo, error)
+	Info(ctx context.Context, model string) (ollama.ModelInfo, error)
 }
 
+// Tools are the MCP tools the model may use (implemented by toolbox.Box).
+type Tools interface {
+	Tools(ctx context.Context) []toolbox.Tool
+	Call(ctx context.Context, name string, args map[string]any) (toolbox.Output, error)
+	Errors() map[string]error
+}
+
+// maxToolRounds limits how many times the model can call tools before answering.
+const maxToolRounds = 6
+
 type Options struct {
+	Tools         Tools // nil = no tools
 	OwnNumber     string
 	Allowed       map[string]bool
 	DefaultModel  string
@@ -56,7 +68,15 @@ type Bot struct {
 type activity struct {
 	model   string
 	started time.Time
+	tool    string             // tool currently running, if any
 	cancel  context.CancelFunc // stops this model call (/stop)
+}
+
+// response is what gets sent back to the user.
+type response struct {
+	text      string
+	fromModel bool // Markdown from the model (converted to Signal formatting)
+	images    []toolbox.Image
 }
 
 func New(ctx context.Context, m Messenger, l LLM, s *store.Store, opt Options) *Bot {
@@ -148,28 +168,46 @@ func (b *Bot) process(sender, text string, queued int) {
 		kind = "command"
 	}
 	slog.Info("message received", "from", mask(sender), "kind", kind, "chars", len(text), "queued", queued)
-	reply, fromModel := b.respond(sender, text)
-	if reply == "" {
+	r := b.respond(sender, text)
+	if r.text == "" && len(r.images) == 0 {
 		return
 	}
-	if err := b.send(sender, reply, fromModel); err != nil {
+	if err := b.send(sender, r); err != nil {
 		slog.Error("send failed", "to", mask(sender), "err", err)
 		return
 	}
-	slog.Info("reply sent", "to", mask(sender), "chars", len(reply), "took", time.Since(start).Round(100*time.Millisecond))
+	slog.Info("reply sent", "to", mask(sender), "chars", len(r.text), "images", len(r.images), "took", time.Since(start).Round(100*time.Millisecond))
 }
 
 // send delivers a reply. Model replies are Markdown, converted to Signal formatting;
 // if the styled send fails, the raw text is sent as a fallback.
-func (b *Bot) send(to, reply string, fromModel bool) error {
-	if !fromModel {
-		return b.msg.Send(b.ctx, to, reply, false)
+func (b *Bot) send(to string, r response) error {
+	var att []signal.Attachment
+	for i, img := range r.images {
+		att = append(att, signal.Attachment{MIME: img.MIME, Name: fmt.Sprintf("image-%d%s", i+1, ext(img.MIME)), Data: img.Data})
 	}
-	if err := b.msg.Send(b.ctx, to, format.ToSignal(reply), true); err != nil {
+	if !r.fromModel {
+		return b.msg.Send(b.ctx, to, r.text, false, att)
+	}
+	if err := b.msg.Send(b.ctx, to, format.ToSignal(r.text), true, att); err != nil {
 		slog.Warn("styled send failed, retrying as plain text", "err", err)
-		return b.msg.Send(b.ctx, to, reply, false)
+		return b.msg.Send(b.ctx, to, r.text, false, att)
 	}
 	return nil
+}
+
+func ext(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	}
+	return ""
 }
 
 func instant(text string) bool {
@@ -177,15 +215,15 @@ func instant(text string) bool {
 	return len(f) > 0 && (f[0] == "/status" || f[0] == "/stats" || f[0] == "/stop")
 }
 
-// respond returns the reply and whether it came from the model (Markdown) rather than a command.
-func (b *Bot) respond(sender, text string) (string, bool) {
+// respond produces the reply for one message.
+func (b *Bot) respond(sender, text string) response {
 	chat, err := b.store.Load(sender)
 	if err != nil {
 		slog.Error("load history", "err", err)
-		return "Couldn't load chat history: " + err.Error(), false
+		return response{text: "Couldn't load chat history: " + err.Error()}
 	}
 	if strings.HasPrefix(text, "/") {
-		return b.command(sender, &chat, text), false
+		return response{text: b.command(sender, &chat, text)}
 	}
 
 	model := chat.Model
@@ -202,11 +240,16 @@ func (b *Bot) respond(sender, text string) (string, bool) {
 	// Fail fast with a clear message if Ollama is down (e.g. the machine is asleep).
 	if err := b.llm.Ping(b.ctx); err != nil {
 		slog.Warn("ollama unreachable", "err", err)
-		return offlineText, false
+		return response{text: offlineText}
 	}
+	info, _ := b.llm.Info(b.ctx, model)
 	think := b.thinkValue(model, chat.Think)
+	var tools []toolbox.Tool
+	if b.opt.Tools != nil && info.Has("tools") {
+		tools = b.opt.Tools.Tools(b.ctx)
+	}
 
-	slog.Info("asking model", "model", model, "history", len(chat.History), "think", chat.Think)
+	slog.Info("asking model", "model", model, "history", len(chat.History), "think", chat.Think, "tools", len(tools))
 	start := time.Now()
 	b.mu.Lock()
 	callCtx, cancel := context.WithCancel(b.ctx)
@@ -214,7 +257,7 @@ func (b *Bot) respond(sender, text string) (string, bool) {
 	b.active[sender] = activity{model: model, started: start, cancel: cancel}
 	b.mu.Unlock()
 	stopTyping := b.typing(sender)
-	res, err := b.llm.Chat(callCtx, model, msgs, think)
+	answer, images, stats, err := b.run(callCtx, sender, model, msgs, think, tools, info.Has("vision"))
 	stopTyping()
 	b.mu.Lock()
 	delete(b.active, sender)
@@ -222,30 +265,113 @@ func (b *Bot) respond(sender, text string) (string, bool) {
 	if err != nil && callCtx.Err() != nil && b.ctx.Err() == nil {
 		// Cancelled by /stop, which already replied. Nothing is saved.
 		slog.Info("model call stopped", "model", model, "took", time.Since(start).Round(100*time.Millisecond))
-		return "", false
+		return response{}
 	}
 	if err != nil {
 		slog.Error("ollama chat", "model", model, "took", time.Since(start).Round(100*time.Millisecond), "err", err)
 		if unreachable(err) {
-			return offlineText, false
+			return response{text: offlineText}
 		}
-		return "Model error: " + err.Error(), false
+		return response{text: "Model error: " + err.Error()}
 	}
 	slog.Info("model replied", "model", model, "took", time.Since(start).Round(100*time.Millisecond),
-		"tokens", res.Stats.EvalCount, "tok_per_s", fmt.Sprintf("%.1f", res.Stats.TokensPerSecond()))
-	reply := res.Content
-	if reply == "" {
-		reply = "(empty reply)"
+		"tokens", stats.EvalCount, "tok_per_s", fmt.Sprintf("%.1f", stats.TokensPerSecond()), "images", len(images))
+	if answer == "" && len(images) == 0 {
+		answer = "(empty reply)"
 	}
 
-	chat.Last = &store.LastReply{Model: model, At: time.Now(), Stats: res.Stats}
+	chat.Last = &store.LastReply{Model: model, At: time.Now(), Stats: stats}
+	saved := answer
+	if len(images) > 0 {
+		saved += fmt.Sprintf("\n\n[%d image(s) were sent to the user with this reply.]", len(images))
+	}
 	chat.History = trim(append(chat.History,
 		ollama.Message{Role: "user", Content: text},
-		ollama.Message{Role: "assistant", Content: reply}), b.opt.HistoryLimit)
+		ollama.Message{Role: "assistant", Content: strings.TrimSpace(saved)}), b.opt.HistoryLimit)
 	if err := b.store.Save(sender, chat); err != nil {
 		slog.Error("save history", "err", err)
 	}
-	return reply, true
+	return response{text: answer, fromModel: true, images: images}
+}
+
+// run asks the model, executing any tool calls it makes, until it gives a final answer.
+// Images returned by tools are collected to send to the user, and shown to the model
+// too if it supports vision.
+func (b *Bot) run(ctx context.Context, sender, model string, msgs []ollama.Message, think any,
+	tools []toolbox.Tool, vision bool) (string, []toolbox.Image, ollama.Stats, error) {
+
+	defs := make([]ollama.Tool, len(tools))
+	for i, t := range tools {
+		defs[i] = ollama.Tool{Type: "function", Function: ollama.ToolFunction{Name: t.Name, Description: t.Description, Parameters: t.Schema}}
+	}
+	var images []toolbox.Image
+	var stats ollama.Stats
+	for round := 0; ; round++ {
+		if round == maxToolRounds {
+			defs = nil // force a final answer
+		}
+		res, err := b.llm.Chat(ctx, model, msgs, think, defs)
+		if err != nil {
+			return "", nil, stats, err
+		}
+		stats.Add(res.Stats)
+		if len(res.ToolCalls) == 0 || len(defs) == 0 {
+			return res.Content, images, stats, nil
+		}
+
+		msgs = append(msgs, ollama.Message{Role: "assistant", Content: res.Content, Thinking: res.Thinking, ToolCalls: res.ToolCalls})
+		for _, tc := range res.ToolCalls {
+			name := tc.Function.Name
+			b.setTool(sender, name)
+			start := time.Now()
+			out, err := b.opt.Tools.Call(ctx, name, tc.Function.Arguments)
+			b.setTool(sender, "")
+			if ctx.Err() != nil {
+				return "", nil, stats, ctx.Err()
+			}
+			slog.Info("tool call", "tool", name, "args", argKeys(tc.Function.Arguments), "took", time.Since(start).Round(time.Millisecond),
+				"images", len(out.Images), "is_error", out.IsError, "err", err)
+
+			msg := ollama.Message{Role: "tool", ToolName: name, Content: out.Text}
+			if err != nil {
+				msg.Content = "Tool failed: " + err.Error()
+			} else if out.IsError {
+				msg.Content = "Tool returned an error: " + out.Text
+			}
+			for _, img := range out.Images {
+				images = append(images, img)
+				if vision {
+					msg.Images = append(msg.Images, img.Data)
+				}
+			}
+			if len(out.Images) > 0 {
+				note := "[%d image(s) returned. They will be sent to the user with your reply; you cannot see them.]"
+				if vision {
+					note = "[%d image(s) attached. They will also be sent to the user with your reply.]"
+				}
+				msg.Content = strings.TrimSpace(msg.Content + "\n" + fmt.Sprintf(note, len(out.Images)))
+			}
+			msgs = append(msgs, msg)
+		}
+	}
+}
+
+func (b *Bot) setTool(sender, tool string) {
+	b.mu.Lock()
+	if a, ok := b.active[sender]; ok {
+		a.tool = tool
+		b.active[sender] = a
+	}
+	b.mu.Unlock()
+}
+
+// argKeys logs argument names only, not values.
+func argKeys(args map[string]any) []string {
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // typing shows the indicator until the returned func is called.
@@ -297,11 +423,11 @@ func (b *Bot) command(sender string, chat *store.Chat, text string) string {
 		thinking := "unknown (Ollama offline)"
 		if err := b.llm.Ping(b.ctx); err != nil {
 			ollamaState = "offline (" + short(err) + ")"
-		} else if info, err := b.llm.Think(b.ctx, current); err == nil {
+		} else if info, err := b.thinkInfo(b.ctx, current); err == nil {
 			thinking = thinkLabel(chat.Think, info)
 		}
-		return fmt.Sprintf("Model: %s\nThinking: %s\nMemory: %d messages (max %d)\nOllama: %s\nNow: %s",
-			current, thinking, len(chat.History), b.opt.HistoryLimit, ollamaState, b.now(sender))
+		return fmt.Sprintf("Model: %s\nThinking: %s\nMemory: %d messages (max %d)\nOllama: %s\n%sNow: %s",
+			current, thinking, len(chat.History), b.opt.HistoryLimit, ollamaState, b.toolsStatus(), b.now(sender))
 	case "/think":
 		return b.thinkCommand(sender, chat, current, args)
 	case "/stop":
@@ -339,7 +465,7 @@ func (b *Bot) command(sender string, chat *store.Chat, text string) string {
 		}
 		msg := "Switched to " + name + "."
 		if chat.Think != "" {
-			if info, err := b.llm.Think(b.ctx, name); err == nil && info.Known && !info.Supports(chat.Think) {
+			if info, err := b.thinkInfo(b.ctx, name); err == nil && info.Known && !info.Supports(chat.Think) {
 				msg += fmt.Sprintf("\nIt doesn't support thinking %q, so it will use its default. Options: %s", chat.Think, options(info))
 			}
 		}
@@ -413,13 +539,18 @@ func short(err error) string {
 	return err.Error()
 }
 
+func (b *Bot) thinkInfo(ctx context.Context, model string) (ollama.ThinkInfo, error) {
+	info, err := b.llm.Info(ctx, model)
+	return info.Think, err
+}
+
 // thinkValue returns the API value for a chat's thinking setting, or nil (model default)
 // if it's unset or the model doesn't support it.
 func (b *Bot) thinkValue(model, setting string) any {
 	if setting == "" {
 		return nil
 	}
-	if info, err := b.llm.Think(b.ctx, model); err == nil && info.Known && !info.Supports(setting) {
+	if info, err := b.thinkInfo(b.ctx, model); err == nil && info.Known && !info.Supports(setting) {
 		slog.Info("thinking setting not supported by model, using default", "model", model, "think", setting)
 		return nil
 	}
@@ -427,7 +558,7 @@ func (b *Bot) thinkValue(model, setting string) any {
 }
 
 func (b *Bot) thinkCommand(sender string, chat *store.Chat, model string, args []string) string {
-	info, err := b.llm.Think(b.ctx, model)
+	info, err := b.thinkInfo(b.ctx, model)
 	if err != nil {
 		if unreachable(err) {
 			return offlineText
@@ -477,6 +608,26 @@ func thinkLabel(setting string, info ollama.ThinkInfo) string {
 	return setting
 }
 
+// toolsStatus is the "Tools:" line for /status (empty if no MCP servers are configured).
+func (b *Bot) toolsStatus() string {
+	if b.opt.Tools == nil {
+		return ""
+	}
+	tools := b.opt.Tools.Tools(b.ctx)
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	line := "Tools: none"
+	if len(names) > 0 {
+		line = "Tools: " + strings.Join(names, ", ")
+	}
+	for server, err := range b.opt.Tools.Errors() {
+		line += fmt.Sprintf("\n%s: unavailable (%s)", server, short(err))
+	}
+	return line + "\n"
+}
+
 // now describes what the bot is doing for sender right now.
 func (b *Bot) now(sender string) string {
 	b.mu.Lock()
@@ -490,6 +641,9 @@ func (b *Bot) now(sender string) string {
 	s := "idle"
 	if busy {
 		s = fmt.Sprintf("%s thinking for %s", a.model, time.Since(a.started).Round(time.Second))
+		if a.tool != "" {
+			s += " (running " + a.tool + ")"
+		}
 	}
 	if waiting > 0 {
 		s += fmt.Sprintf(", %d message(s) waiting", waiting)

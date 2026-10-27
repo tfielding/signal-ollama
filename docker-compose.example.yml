@@ -13,6 +13,8 @@ services:
       # - OLLAMA_MODEL=llama3.2:latest  # default: first installed model
       # - HISTORY_LIMIT=40
       # - SYSTEM_PROMPT=...
+      # - MCP_SERVERS=cams=http://<go2rtc-mcp-host>:8090/mcp   # tools from MCP servers
+      # - MCP_TOKEN_CAMS=...                                   # if that server has AUTH_TOKEN set
     volumes:
       # the image runs as uid 65532: sudo mkdir -p /opt/signal-ollama && sudo chown 65532:65532 /opt/signal-ollama
       - /opt/signal-ollama:/data

@@ -4,6 +4,7 @@ package signal
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,6 +36,13 @@ type DataMessage struct {
 
 type GroupInfo struct {
 	GroupID string `json:"groupId"`
+}
+
+// Attachment is a file sent with a message.
+type Attachment struct {
+	MIME string
+	Name string
+	Data []byte
 }
 
 type Client struct {
@@ -95,17 +103,25 @@ func (c *Client) listenOnce(ctx context.Context, wsURL string, handle func(Envel
 
 // Send sends a message to a single recipient. With styled set, the container
 // turns **bold**, *italic*, ~strike~, `mono` and ||spoiler|| into Signal formatting.
-func (c *Client) Send(ctx context.Context, recipient, text string, styled bool) error {
+func (c *Client) Send(ctx context.Context, recipient, text string, styled bool, attachments []Attachment) error {
 	mode := "normal"
 	if styled {
 		mode = "styled"
 	}
-	return c.do(ctx, http.MethodPost, "/v2/send", map[string]any{
+	body := map[string]any{
 		"number":     c.number,
 		"recipients": []string{recipient},
 		"message":    text,
 		"text_mode":  mode,
-	})
+	}
+	if len(attachments) > 0 {
+		enc := make([]string, len(attachments))
+		for i, a := range attachments {
+			enc[i] = fmt.Sprintf("data:%s;filename=%s;base64,%s", a.MIME, a.Name, base64.StdEncoding.EncodeToString(a.Data))
+		}
+		body["base64_attachments"] = enc
+	}
+	return c.do(ctx, http.MethodPost, "/v2/send", body)
 }
 
 // Typing starts or stops the typing indicator shown to recipient.

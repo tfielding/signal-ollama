@@ -15,6 +15,7 @@ import (
 	"signal-ollama/internal/ollama"
 	sig "signal-ollama/internal/signal"
 	"signal-ollama/internal/store"
+	"signal-ollama/internal/toolbox"
 )
 
 func main() {
@@ -45,7 +46,19 @@ func run() error {
 		return err
 	}
 	sc := sig.New(cfg.SignalURL, cfg.SignalNumber)
+	var tools bot.Tools
+	if len(cfg.MCPServers) > 0 {
+		box := toolbox.New(cfg.MCPServers, toolbox.Options{Allowed: cfg.MCPTools, AllowWrite: cfg.MCPAllowWrite})
+		defer box.Close()
+		names := []string{}
+		for _, t := range box.Tools(ctx) {
+			names = append(names, t.Name)
+		}
+		slog.Info("mcp tools", "servers", len(cfg.MCPServers), "tools", names)
+		tools = box
+	}
 	b := bot.New(ctx, sc, llm, st, bot.Options{
+		Tools:        tools,
 		OwnNumber:    cfg.SignalNumber,
 		Allowed:      cfg.Allowed,
 		DefaultModel: cfg.DefaultModel,

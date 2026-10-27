@@ -44,15 +44,17 @@ func TestThinkAndChat(t *testing.T) {
 	if err := c.Ping(ctx); err != nil {
 		t.Fatal(err)
 	}
-	g, _ := c.Think(ctx, "gpt-oss")
+	gi, _ := c.Info(ctx, "gpt-oss")
+	g := gi.Think
 	if !g.Known || g.Default != "medium" || !g.Supports("low") || g.Supports("off") {
 		t.Fatalf("gpt-oss: %+v", g)
 	}
-	q, _ := c.Think(ctx, "qwen")
+	qi, _ := c.Info(ctx, "qwen")
+	q := qi.Think
 	if !q.Known || q.Default != "on" || !q.Supports("off") {
 		t.Fatalf("qwen: %+v", q)
 	}
-	if u, _ := c.Think(ctx, "llama"); u.Known {
+	if u, _ := c.Info(ctx, "llama"); u.Think.Known {
 		t.Fatalf("llama: %+v", u)
 	}
 
@@ -60,7 +62,7 @@ func TestThinkAndChat(t *testing.T) {
 		setting string
 		want    any
 	}{{"", "absent"}, {"off", false}, {"on", true}, {"low", "low"}} {
-		res, err := c.Chat(ctx, "m", nil, ThinkValue(tc.setting))
+		res, err := c.Chat(ctx, "m", nil, ThinkValue(tc.setting), nil)
 		if err != nil || res.Content != "ok" || res.Stats.TokensPerSecond() != 10 {
 			t.Fatalf("chat: %+v %v", res, err)
 		}
@@ -93,7 +95,7 @@ func TestChatCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
 	start := time.Now()
-	if _, err := c.Chat(ctx, "m", nil, nil); err == nil {
+	if _, err := c.Chat(ctx, "m", nil, nil, nil); err == nil {
 		t.Fatal("expected error")
 	}
 	if time.Since(start) > 2*time.Second {
