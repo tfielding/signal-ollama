@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -105,5 +106,54 @@ func TestParseServers(t *testing.T) {
 	}
 	if got, err := ParseServers("", nil); err != nil || len(got) != 0 {
 		t.Fatalf("empty: %v %v", got, err)
+	}
+}
+
+func TestCleanArgs(t *testing.T) {
+	none := map[string]any{"type": "object", "additionalProperties": false}
+	noneNoAP := map[string]any{"type": "object"}
+	some := map[string]any{"type": "object", "properties": map[string]any{"camera": map[string]any{"type": "string"}}, "additionalProperties": false}
+	open := map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{}}, "additionalProperties": true}
+	args := map[string]any{"camera": "x", "area": "Kitchen", "domain": "light"}
+
+	cases := []struct {
+		name    string
+		schema  any
+		keep    string
+		dropped string
+	}{
+		{"no params (additionalProperties false)", none, "", "area,camera,domain"},
+		{"no params (bare object)", noneNoAP, "", "area,camera,domain"},
+		{"declared params", some, "camera", "area,domain"},
+		{"additional allowed", open, "area,camera,domain", ""},
+		{"no schema", nil, "area,camera,domain", ""},
+	}
+	for _, c := range cases {
+		got, dropped := cleanArgs(c.schema, args)
+		keys := []string{}
+		for k := range got {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if strings.Join(keys, ",") != c.keep || strings.Join(dropped, ",") != c.dropped {
+			t.Errorf("%s: kept %v dropped %v", c.name, keys, dropped)
+		}
+	}
+}
+
+func TestInventedArgsDroppedEndToEnd(t *testing.T) {
+	s := mcp.NewServer(&mcp.Implementation{Name: "ha", Version: "1"}, nil)
+	mcp.AddTool(s, &mcp.Tool{Name: "GetLiveContext", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
+		func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Kitchen light: on"}}}, nil, nil
+		})
+	srv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil))
+	defer srv.Close()
+	box := New([]Server{{Name: "ha", URL: srv.URL}}, Options{})
+	defer box.Close()
+
+	out, err := box.Call(context.Background(), "GetLiveContext", map[string]any{"area": "Kitchen", "domain": "light"})
+	if err != nil || out.IsError || out.Text != "Kitchen light: on" || strings.Join(out.Dropped, ",") != "area,domain" {
+		t.Fatalf("got %+v err=%v", out, err)
 	}
 }

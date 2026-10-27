@@ -4,6 +4,7 @@ package toolbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -50,6 +51,7 @@ type Output struct {
 	Text    string
 	Images  []Image
 	IsError bool
+	Dropped []string // arguments removed because the tool doesn't accept them
 }
 
 type Options struct {
@@ -139,9 +141,7 @@ func (b *Box) Call(ctx context.Context, name string, args map[string]any) (Outpu
 	srv, _ := b.server(tool.server)
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	if args == nil {
-		args = map[string]any{}
-	}
+	args, dropped := cleanArgs(tool.Schema, args)
 
 	var res *mcp.CallToolResult
 	err := b.withSession(ctx, srv, func(cs *mcp.ClientSession) error {
@@ -150,9 +150,57 @@ func (b *Box) Call(ctx context.Context, name string, args map[string]any) (Outpu
 		return err
 	})
 	if err != nil {
-		return Output{}, err
+		return Output{Dropped: dropped}, err
 	}
-	return convert(res), nil
+	out := convert(res)
+	out.Dropped = dropped
+	return out, nil
+}
+
+// cleanArgs removes arguments the tool's input schema doesn't declare. Small models
+// often invent parameters (e.g. passing "area" to a tool that takes none), which
+// makes the server reject the call. Tools that accept extra properties are left alone.
+func cleanArgs(schema any, args map[string]any) (map[string]any, []string) {
+	clean := map[string]any{}
+	if len(args) == 0 {
+		return clean, nil
+	}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return args, nil
+	}
+	var s struct {
+		Properties           map[string]json.RawMessage `json:"properties"`
+		AdditionalProperties json.RawMessage            `json:"additionalProperties"`
+	}
+	if json.Unmarshal(raw, &s) != nil {
+		return args, nil
+	}
+	extraOK := len(s.AdditionalProperties) > 0 && string(s.AdditionalProperties) != "false"
+	if extraOK || (s.Properties == nil && len(s.AdditionalProperties) == 0 && !emptyObject(raw)) {
+		return args, nil // schema allows anything, or says nothing we can rely on
+	}
+	var dropped []string
+	for k, v := range args {
+		if _, ok := s.Properties[k]; ok {
+			clean[k] = v
+		} else {
+			dropped = append(dropped, k)
+		}
+	}
+	sort.Strings(dropped)
+	return clean, dropped
+}
+
+// emptyObject reports whether a schema is {"type":"object"} with no properties at all,
+// which for tool inputs means "takes no arguments".
+func emptyObject(raw []byte) bool {
+	var s map[string]any
+	if json.Unmarshal(raw, &s) != nil {
+		return false
+	}
+	_, hasProps := s["properties"]
+	return s["type"] == "object" && !hasProps
 }
 
 func convert(res *mcp.CallToolResult) Output {

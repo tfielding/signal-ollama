@@ -42,6 +42,9 @@ type Tools interface {
 // maxToolRounds limits how many times the model can call tools before answering.
 const maxToolRounds = 6
 
+// maxToolFailures stops tool use early when calls keep failing.
+const maxToolFailures = 3
+
 type Options struct {
 	Tools         Tools // nil = no tools
 	OwnNumber     string
@@ -249,6 +252,16 @@ func (b *Bot) respond(sender, text string) response {
 		tools = b.opt.Tools.Tools(b.ctx)
 	}
 
+	if len(tools) > 0 {
+		// Inserted after the main system prompt so it applies even with a custom SYSTEM_PROMPT.
+		guide := ollama.Message{Role: "system", Content: toolGuidance}
+		at := 0
+		if b.opt.SystemPrompt != "" {
+			at = 1
+		}
+		msgs = append(msgs[:at], append([]ollama.Message{guide}, msgs[at:]...)...)
+	}
+
 	slog.Info("asking model", "model", model, "history", len(chat.History), "think", chat.Think, "tools", len(tools))
 	start := time.Now()
 	b.mu.Lock()
@@ -306,8 +319,14 @@ func (b *Bot) run(ctx context.Context, sender, model string, msgs []ollama.Messa
 	}
 	var images []toolbox.Image
 	var stats ollama.Stats
+	failures := 0
 	for round := 0; ; round++ {
-		if round == maxToolRounds {
+		if round == maxToolRounds || failures >= maxToolFailures {
+			if len(defs) > 0 {
+				slog.Warn("no more tool calls for this message, asking for a final answer", "rounds", round, "failures", failures)
+				msgs = append(msgs, ollama.Message{Role: "system", Content: "Tool use is over for this message. " +
+					"Answer now with what you have. If the tools failed, say so plainly; do not guess values."})
+			}
 			defs = nil // force a final answer
 		}
 		res, err := b.llm.Chat(ctx, model, msgs, think, defs)
@@ -316,6 +335,9 @@ func (b *Bot) run(ctx context.Context, sender, model string, msgs []ollama.Messa
 		}
 		stats.Add(res.Stats)
 		if len(res.ToolCalls) == 0 || len(defs) == 0 {
+			if strings.TrimSpace(res.Content) == "" && len(images) == 0 {
+				return emptyAnswer(failures, round), nil, stats, nil
+			}
 			return res.Content, images, stats, nil
 		}
 
@@ -329,8 +351,20 @@ func (b *Bot) run(ctx context.Context, sender, model string, msgs []ollama.Messa
 			if ctx.Err() != nil {
 				return "", nil, stats, ctx.Err()
 			}
-			slog.Info("tool call", "tool", name, "args", argKeys(tc.Function.Arguments), "took", time.Since(start).Round(time.Millisecond),
-				"images", len(out.Images), "is_error", out.IsError, "err", err)
+			attrs := []any{"tool", name, "args", argKeys(tc.Function.Arguments), "took", time.Since(start).Round(time.Millisecond),
+				"images", len(out.Images), "is_error", out.IsError}
+			if len(out.Dropped) > 0 {
+				attrs = append(attrs, "dropped_args", out.Dropped)
+			}
+			if err != nil {
+				attrs = append(attrs, "err", err)
+			} else if out.IsError {
+				attrs = append(attrs, "error_text", snippet(out.Text, 200))
+			}
+			slog.Info("tool call", attrs...)
+			if err != nil || out.IsError {
+				failures++
+			}
 
 			msg := ollama.Message{Role: "tool", ToolName: name, Content: out.Text}
 			if err != nil {
@@ -354,6 +388,25 @@ func (b *Bot) run(ctx context.Context, sender, model string, msgs []ollama.Messa
 			msgs = append(msgs, msg)
 		}
 	}
+}
+
+// emptyAnswer explains a blank reply instead of sending nothing useful.
+func emptyAnswer(failures, rounds int) string {
+	if failures > 0 {
+		return fmt.Sprintf("Sorry, I couldn't get an answer: %d tool call(s) failed. Try rephrasing, or check the bot's logs for the tool error.", failures)
+	}
+	if rounds > 0 {
+		return "Sorry, the model returned no answer after using its tools. Try asking again."
+	}
+	return "Sorry, the model returned an empty answer. Try asking again, or /reset if this keeps happening."
+}
+
+func snippet(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 func (b *Bot) setTool(sender, tool string) {
@@ -484,6 +537,15 @@ const helpText = `Commands:
 /stop - cancel the reply in progress (and anything waiting)
 /stats - speed of the last reply
 /help - this message`
+
+// toolGuidance is added to the prompt whenever tools are available. It is deliberately
+// generic: nothing here knows what the tools are.
+const toolGuidance = "You have tools that provide live information and actions. " +
+	"Use them whenever an answer depends on current, real-world state instead of guessing or saying you can't. " +
+	"That state changes: call the tools again rather than relying on earlier messages in this conversation. " +
+	"Pass only the parameters a tool defines. If a tool returns an error, read it and change the call; do not repeat the same call. " +
+	"Never invent readings or devices: report only what the tools returned, and say so if they failed. " +
+	"Only offer to do things you have a tool for."
 
 const offlineText = "Can't reach Ollama right now. The machine running it may be asleep or offline. Try again in a bit."
 

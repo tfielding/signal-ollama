@@ -176,6 +176,11 @@ func TestToolSnapshotSentAsAttachment(t *testing.T) {
 		t.Fatalf("offered tools: %v", offered)
 	}
 
+	// Tool guidance is added after the main system prompt when tools are offered.
+	if len(reqs[0].Messages) < 2 || reqs[0].Messages[0].Role != "system" || !strings.Contains(reqs[0].Messages[0].Content, "call the tools again") {
+		t.Fatalf("tool guidance missing: %+v", reqs[0].Messages)
+	}
+
 	// Second call carries the assistant tool call and the tool result (text only: no vision).
 	if len(reqs) != 2 {
 		t.Fatalf("expected 2 model calls, got %d", len(reqs))
@@ -222,7 +227,76 @@ func TestNoToolsForModelWithoutToolSupport(t *testing.T) {
 	if len(reqs[0].Tools) != 0 {
 		t.Fatalf("tools offered to a model without tool support: %v", reqs[0].Tools)
 	}
+	for _, m := range reqs[0].Messages {
+		if strings.Contains(m.Content, "call the tools again") {
+			t.Fatal("tool guidance added without tools")
+		}
+	}
 	if sent["base64_attachments"] != nil {
 		t.Fatalf("unexpected attachments")
+	}
+}
+
+// TestRepeatedToolFailuresStopEarly: a model that keeps calling a tool wrongly is cut off
+// after maxToolFailures, told to answer, and a blank answer is explained to the user.
+func TestRepeatedToolFailuresStopEarly(t *testing.T) {
+	const botNum, me = "+15550000009", "+15550000001"
+	var mu sync.Mutex
+	var reqs []chatReq
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			w.Write([]byte(`{"version":"t"}`))
+		case "/api/show":
+			w.Write([]byte(`{"capabilities":["completion","tools"]}`))
+		case "/api/chat":
+			var req chatReq
+			json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			reqs = append(reqs, req)
+			mu.Unlock()
+			if len(req.Tools) == 0 { // forced final answer: come back blank, like gpt-oss did
+				w.Write([]byte(`{"message":{"role":"assistant","content":""}}`))
+				return
+			}
+			w.Write([]byte(`{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"get_snapshot","arguments":{"camera":"attic"}}}]}}`))
+		}
+	}))
+	defer llm.Close()
+	sends := make(chan map[string]any, 4)
+	sigSrv := fakeSignal(t, botNum, me, sends)
+	cams := mcpServer(t, "tok")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	box := toolbox.New([]toolbox.Server{{Name: "cams", URL: cams.URL, Token: "tok"}}, toolbox.Options{})
+	defer box.Close()
+	st, _ := store.New(t.TempDir())
+	sc := sig.New(sigSrv.URL, botNum)
+	b := bot.New(ctx, sc, ollama.New(llm.URL, 5*time.Second), st, bot.Options{
+		Tools: box, OwnNumber: botNum, Allowed: map[string]bool{me: true}, DefaultModel: "m", HistoryLimit: 10,
+	})
+	done := make(chan struct{})
+	go func() { sc.Listen(ctx, b.Handle); close(done) }()
+	var sent map[string]any
+	select {
+	case sent = <-sends:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no reply")
+	}
+	cancel()
+	<-done
+	b.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reqs) != 4 { // 3 failing tool rounds, then one forced answer
+		t.Fatalf("model calls: %d", len(reqs))
+	}
+	last := reqs[3]
+	if len(last.Tools) != 0 || !strings.Contains(last.Messages[len(last.Messages)-1].Content, "do not guess") {
+		t.Fatalf("final request: tools=%d last=%+v", len(last.Tools), last.Messages[len(last.Messages)-1])
+	}
+	if msg, _ := sent["message"].(string); !strings.Contains(msg, "3 tool call(s) failed") {
+		t.Fatalf("reply: %q", msg)
 	}
 }
