@@ -22,7 +22,7 @@ type Messenger interface {
 
 // LLM is the model side (implemented by ollama.Client).
 type LLM interface {
-	Chat(ctx context.Context, model string, msgs []ollama.Message) (string, error)
+	Chat(ctx context.Context, model string, msgs []ollama.Message) (ollama.Result, error)
 	Models(ctx context.Context) ([]string, error)
 }
 
@@ -44,20 +44,36 @@ type Bot struct {
 	ctx     context.Context
 	mu      sync.Mutex
 	queues  map[string]chan string // one worker per sender keeps replies in order
+	active  map[string]activity    // model call currently running, per sender
 	workers sync.WaitGroup
+}
+
+type activity struct {
+	model   string
+	started time.Time
 }
 
 func New(ctx context.Context, m Messenger, l LLM, s *store.Store, opt Options) *Bot {
 	if opt.TypingRefresh == 0 {
 		opt.TypingRefresh = 10 * time.Second
 	}
-	return &Bot{msg: m, llm: l, store: s, opt: opt, ctx: ctx, queues: map[string]chan string{}}
+	return &Bot{msg: m, llm: l, store: s, opt: opt, ctx: ctx,
+		queues: map[string]chan string{}, active: map[string]activity{}}
 }
 
 // Handle is called for every incoming envelope. It never blocks on the model.
 func (b *Bot) Handle(env signal.Envelope) {
 	sender, text, ok := b.accept(env)
 	if !ok {
+		return
+	}
+	// Read-only commands skip the queue so they answer even mid-reply.
+	if instant(text) {
+		b.workers.Add(1)
+		go func() {
+			defer b.workers.Done()
+			b.process(sender, text, 0)
+		}()
 		return
 	}
 	b.mu.Lock()
@@ -113,23 +129,33 @@ func (b *Bot) worker(sender string, q chan string) {
 		case <-b.ctx.Done():
 			return
 		case text := <-q:
-			start := time.Now()
-			kind := "chat"
-			if strings.HasPrefix(text, "/") {
-				kind = "command"
-			}
-			slog.Info("message received", "from", mask(sender), "kind", kind, "chars", len(text), "queued", len(q))
-			reply := b.respond(sender, text)
-			if reply == "" {
-				continue
-			}
-			if err := b.msg.Send(b.ctx, sender, reply); err != nil {
-				slog.Error("send failed", "to", mask(sender), "err", err)
-				continue
-			}
-			slog.Info("reply sent", "to", mask(sender), "chars", len(reply), "took", time.Since(start).Round(100*time.Millisecond))
+			b.process(sender, text, len(q))
 		}
 	}
+}
+
+// process answers one message and sends the reply.
+func (b *Bot) process(sender, text string, queued int) {
+	start := time.Now()
+	kind := "chat"
+	if strings.HasPrefix(text, "/") {
+		kind = "command"
+	}
+	slog.Info("message received", "from", mask(sender), "kind", kind, "chars", len(text), "queued", queued)
+	reply := b.respond(sender, text)
+	if reply == "" {
+		return
+	}
+	if err := b.msg.Send(b.ctx, sender, reply); err != nil {
+		slog.Error("send failed", "to", mask(sender), "err", err)
+		return
+	}
+	slog.Info("reply sent", "to", mask(sender), "chars", len(reply), "took", time.Since(start).Round(100*time.Millisecond))
+}
+
+func instant(text string) bool {
+	f := strings.Fields(strings.ToLower(text))
+	return len(f) > 0 && (f[0] == "/status" || f[0] == "/stats")
 }
 
 func (b *Bot) respond(sender, text string) string {
@@ -155,18 +181,27 @@ func (b *Bot) respond(sender, text string) string {
 
 	slog.Info("asking model", "model", model, "history", len(chat.History))
 	start := time.Now()
+	b.mu.Lock()
+	b.active[sender] = activity{model: model, started: start}
+	b.mu.Unlock()
 	stopTyping := b.typing(sender)
-	reply, err := b.llm.Chat(b.ctx, model, msgs)
+	res, err := b.llm.Chat(b.ctx, model, msgs)
 	stopTyping()
+	b.mu.Lock()
+	delete(b.active, sender)
+	b.mu.Unlock()
 	if err != nil {
 		slog.Error("ollama chat", "model", model, "took", time.Since(start).Round(100*time.Millisecond), "err", err)
 		return "Model error: " + err.Error()
 	}
-	slog.Info("model replied", "model", model, "took", time.Since(start).Round(100*time.Millisecond))
+	slog.Info("model replied", "model", model, "took", time.Since(start).Round(100*time.Millisecond),
+		"tokens", res.Stats.EvalCount, "tok_per_s", fmt.Sprintf("%.1f", res.Stats.TokensPerSecond()))
+	reply := res.Content
 	if reply == "" {
 		reply = "(empty reply)"
 	}
 
+	chat.Last = &store.LastReply{Model: model, At: time.Now(), Stats: res.Stats}
 	chat.History = trim(append(chat.History,
 		ollama.Message{Role: "user", Content: text},
 		ollama.Message{Role: "assistant", Content: reply}), b.opt.HistoryLimit)
@@ -221,7 +256,10 @@ func (b *Bot) command(sender string, chat *store.Chat, text string) string {
 		}
 		return "History cleared."
 	case "/status":
-		return fmt.Sprintf("Model: %s\nMessages in memory: %d (max %d)", current, len(chat.History), b.opt.HistoryLimit)
+		return fmt.Sprintf("Model: %s\nMemory: %d messages (max %d)\nNow: %s",
+			current, len(chat.History), b.opt.HistoryLimit, b.now(sender))
+	case "/stats":
+		return statsText(chat.Last)
 	case "/model":
 		models, err := b.llm.Models(b.ctx)
 		if err != nil {
@@ -261,8 +299,46 @@ const helpText = `Commands:
 /model - list models
 /model <name> - switch model
 /reset - clear conversation memory
-/status - current model and memory
+/status - model, memory, and what's running now
+/stats - speed of the last reply
 /help - this message`
+
+// now describes what the bot is doing for sender right now.
+func (b *Bot) now(sender string) string {
+	b.mu.Lock()
+	a, busy := b.active[sender]
+	waiting := 0
+	if q := b.queues[sender]; q != nil {
+		waiting = len(q)
+	}
+	b.mu.Unlock()
+
+	s := "idle"
+	if busy {
+		s = fmt.Sprintf("%s thinking for %s", a.model, time.Since(a.started).Round(time.Second))
+	}
+	if waiting > 0 {
+		s += fmt.Sprintf(", %d message(s) waiting", waiting)
+	}
+	return s
+}
+
+func statsText(l *store.LastReply) string {
+	if l == nil {
+		return "No replies yet."
+	}
+	s := l.Stats
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Last reply: %s, %s ago\n", l.Model, time.Since(l.At).Round(time.Second))
+	fmt.Fprintf(&sb, "Output: %d tokens at %.1f tok/s (%s)\n", s.EvalCount, s.TokensPerSecond(), round(s.EvalDuration))
+	fmt.Fprintf(&sb, "Prompt: %d tokens at %.0f tok/s (%s)\n", s.PromptEvalCount, s.PromptTokensPerSecond(), round(s.PromptEvalDuration))
+	fmt.Fprintf(&sb, "Model load: %s\n", round(s.LoadDuration))
+	fmt.Fprintf(&sb, "Total: %s\n", round(s.TotalDuration))
+	sb.WriteString("(Output includes thinking tokens.)")
+	return sb.String()
+}
+
+func round(d time.Duration) time.Duration { return d.Round(100 * time.Millisecond) }
 
 // match finds a model by exact name, or by name without the ":tag" (e.g. "llama3.2" -> "llama3.2:latest").
 func match(models []string, want string) (string, bool) {
