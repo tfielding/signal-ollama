@@ -547,7 +547,8 @@ const helpText = `Commands:
 const toolGuidance = "You have tools that provide live information and actions. " +
 	"Use them whenever an answer depends on current, real-world state instead of guessing or saying you can't. " +
 	"That state changes: call the tools again rather than relying on earlier messages in this conversation. " +
-	"Pass only the parameters a tool defines. If a tool returns an error, read it and change the call; do not repeat the same call. " +
+	"Pass only the parameters a tool defines, and leave optional filters out unless you're sure of the exact value. " +
+	"If a tool returns an error or finds nothing, read the message and try again with fewer filters or none; do not repeat the same call. " +
 	"Never invent readings or devices: report only what the tools returned, and say so if they failed. " +
 	"Only offer to do things you have a tool for."
 

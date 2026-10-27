@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
@@ -166,9 +167,32 @@ func (b *Box) Call(ctx context.Context, name string, args map[string]any) (Outpu
 // makes the server reject the call. Tools that accept extra properties are left alone.
 func cleanArgs(schema any, args map[string]any) (map[string]any, []string) {
 	clean := map[string]any{}
-	if len(args) == 0 {
-		return clean, nil
+	// Blank values are almost always the model filling in optional parameters it
+	// doesn't mean to use ("area": ""), which some servers treat as a filter.
+	var blank []string
+	for k, v := range args {
+		if s, ok := v.(string); (ok && strings.TrimSpace(s) == "") || v == nil {
+			blank = append(blank, k)
+		}
 	}
+	if len(blank) > 0 {
+		args = maps.Clone(args)
+		for _, k := range blank {
+			delete(args, k)
+		}
+	}
+	if len(args) == 0 {
+		sort.Strings(blank)
+		return clean, blank
+	}
+	args, dropped := cleanUndeclared(schema, args)
+	dropped = append(dropped, blank...)
+	sort.Strings(dropped)
+	return args, dropped
+}
+
+func cleanUndeclared(schema any, args map[string]any) (map[string]any, []string) {
+	clean := map[string]any{}
 	raw, err := json.Marshal(schema)
 	if err != nil {
 		return args, nil

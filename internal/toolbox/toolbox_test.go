@@ -129,6 +129,10 @@ func TestCleanArgs(t *testing.T) {
 		{"additional allowed", open, "area,camera,domain", ""},
 		{"no schema", nil, "area,camera,domain", ""},
 	}
+	got, dropped := cleanArgs(some, map[string]any{"camera": "x", "area": "", "name": "  ", "domain": nil})
+	if len(got) != 1 || got["camera"] != "x" || strings.Join(dropped, ",") != "area,domain,name" {
+		t.Errorf("blank values: kept %v dropped %v", got, dropped)
+	}
 	for _, c := range cases {
 		got, dropped := cleanArgs(c.schema, args)
 		keys := []string{}
