@@ -1,0 +1,19 @@
+# Add the signal-ollama service to the compose file that already runs
+# signal-cli-rest-api (MODE=json-rpc), so they share a Docker network.
+services:
+  signal-ollama:
+    container_name: signal-ollama
+    build: ./signal-ollama          # path to this repo
+    restart: always
+    environment:
+      - SIGNAL_URL=http://signal-cli-rest-api:8080
+      - SIGNAL_NUMBER=+1XXXXXXXXXX      # number already registered in signal-cli-rest-api
+      - ALLOWED_SENDERS=+1YYYYYYYYYY    # your phone; comma-separate to add more
+      - OLLAMA_URL=http://192.168.1.XX:11434
+      # - OLLAMA_MODEL=llama3.2:latest  # default: first installed model
+      # - HISTORY_LIMIT=40
+      # - SYSTEM_PROMPT=...
+    volumes:
+      - /opt/signal-ollama:/data
+    depends_on:
+      - signal-cli-rest-api
