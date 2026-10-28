@@ -37,6 +37,7 @@ type Tools interface {
 	Tools(ctx context.Context) []toolbox.Tool
 	Call(ctx context.Context, name string, args map[string]any) (toolbox.Output, error)
 	Errors() map[string]error
+	Guidance(tools []toolbox.Tool) string
 }
 
 // maxToolRounds limits how many times the model can call tools before answering.
@@ -254,7 +255,11 @@ func (b *Bot) respond(sender, text string) response {
 
 	if len(tools) > 0 {
 		// Inserted after the main system prompt so it applies even with a custom SYSTEM_PROMPT.
-		guide := ollama.Message{Role: "system", Content: toolGuidance}
+		content := toolGuidance
+		if extra := b.opt.Tools.Guidance(tools); extra != "" {
+			content += "\n\n" + extra
+		}
+		guide := ollama.Message{Role: "system", Content: content}
 		at := 0
 		if b.opt.SystemPrompt != "" {
 			at = 1
@@ -547,12 +552,12 @@ const helpText = `Commands:
 
 // toolGuidance is added to the prompt whenever tools are available. It is deliberately
 // generic: nothing here knows what the tools are.
-const toolGuidance = "You have tools that provide live information and actions. " +
-	"Use them whenever an answer depends on current, real-world state instead of guessing or saying you can't. " +
-	"That state changes: call the tools again rather than relying on earlier messages in this conversation. " +
-	"Pass only the parameters a tool defines, and leave optional filters out unless you're sure of the exact value. " +
-	"If a tool returns an error or finds nothing, read the message and try again with fewer filters or none; do not repeat the same call. " +
-	"Never invent readings or devices: report only what the tools returned, and say so if they failed. " +
+const toolGuidance = "You have tools that can look things up or take actions. " +
+	"Use them whenever an answer depends on information they can provide, instead of guessing or saying you can't. " +
+	"Information from tools can change: call them again rather than relying on earlier messages in this conversation. " +
+	"Pass only the parameters a tool defines, and leave optional parameters out unless you're sure of the exact value. " +
+	"If a tool returns an error or nothing useful, read the message and try a different call (often with fewer parameters); do not repeat the same call. " +
+	"Never invent facts or data: report only what the tools returned, and say so if they failed. " +
 	"Only offer to do things you have a tool for."
 
 const offlineText = "Can't reach Ollama right now. The machine running it may be asleep or offline. Try again in a bit."

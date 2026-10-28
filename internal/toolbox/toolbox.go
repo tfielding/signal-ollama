@@ -31,7 +31,11 @@ type Server struct {
 	Name  string
 	URL   string
 	Token string // optional bearer token
+	Hint  string // optional usage notes for the model, from config (MCP_HINT_<NAME>)
 }
+
+// maxGuidanceChars caps each server's instructions + hint in the prompt.
+const maxGuidanceChars = 2000
 
 // Tool is a tool as exposed to the model.
 type Tool struct {
@@ -75,7 +79,8 @@ type Box struct {
 	tools    []Tool
 	errs     map[string]error // last listing error per server
 	fetched  time.Time
-	hidden   map[string]bool // tools already logged as hidden
+	hidden   map[string]bool   // tools already logged as hidden
+	instr    map[string]string // instructions each server sent when we connected
 }
 
 func New(servers []Server, opt Options) *Box {
@@ -86,6 +91,7 @@ func New(servers []Server, opt Options) *Box {
 		sessions: map[string]*mcp.ClientSession{},
 		errs:     map[string]error{},
 		hidden:   map[string]bool{},
+		instr:    map[string]string{},
 	}
 }
 
@@ -165,16 +171,18 @@ func (b *Box) Call(ctx context.Context, name string, args map[string]any) (Outpu
 	out := convert(res, b.maxChars())
 	out.Dropped = dropped
 
-	// Small models often guess filter values that don't exist ("area: All"). If every
-	// parameter is optional, the unfiltered call is always valid, so retry once without
-	// arguments and tell the model what happened.
-	if out.IsError && len(args) > 0 && !hasRequired(tool.Schema) {
+	// Small models often guess optional values that don't exist ("area: All"). If every
+	// parameter is optional, a call without them is valid, so retry once and tell the
+	// model what happened.
+	// Only for read-only tools: retrying an action with its arguments removed could
+	// widen what it does (e.g. "turn off" without an area).
+	if out.IsError && tool.ReadOnly && len(args) > 0 && !hasRequired(tool.Schema) {
 		failure := strings.TrimSpace(out.Text)
 		if res2, err2 := call(map[string]any{}); err2 == nil && !res2.IsError {
 			all := convert(res2, b.maxChars())
 			all.Dropped = dropped
 			all.Retried = failure
-			all.Text = fmt.Sprintf("[Your filters failed (%s), so this is the unfiltered result. Pick out what the user asked for.]\n%s", failure, all.Text)
+			all.Text = fmt.Sprintf("[The call with your optional parameters failed (%s), so this is the result without them. Pick out what the user asked for.]\n%s", failure, all.Text)
 			return all, nil
 		}
 	}
@@ -296,7 +304,7 @@ func convert(res *mcp.CallToolResult, max int) Output {
 }
 
 // unwrap turns a JSON object holding a single string field, like {"result": "line\nline"},
-// into that string. Some servers double-encode text this way, which hides line breaks
+// into "result:" followed by that string (the key is kept, since it can carry meaning). Some servers double-encode text this way, which hides line breaks
 // as escaped "\n" and costs extra tokens. Anything else is returned unchanged.
 func unwrap(s string) string {
 	t := strings.TrimSpace(s)
@@ -307,13 +315,53 @@ func unwrap(s string) string {
 	if json.Unmarshal([]byte(t), &obj) != nil || len(obj) != 1 {
 		return s
 	}
-	for _, raw := range obj {
+	for key, raw := range obj {
 		var inner string
 		if json.Unmarshal(raw, &inner) == nil {
-			return inner
+			return key + ":\n" + inner
 		}
 	}
 	return s
+}
+
+// Server returns the name of the MCP server that provides t.
+func (t Tool) Server() string { return t.server }
+
+// Guidance returns per-server usage notes for the servers behind tools: the instructions
+// each server sent itself, plus any hint from config. Empty if there are none.
+func (b *Box) Guidance(tools []Tool) string {
+	seen := map[string]bool{}
+	var parts []string
+	for _, t := range tools {
+		if seen[t.server] {
+			continue
+		}
+		seen[t.server] = true
+		srv, _ := b.server(t.server)
+		b.mu.Lock()
+		instr := b.instr[t.server]
+		b.mu.Unlock()
+		var notes []string
+		if instr != "" {
+			notes = append(notes, instr)
+		}
+		if h := strings.TrimSpace(srv.Hint); h != "" {
+			notes = append(notes, h)
+		}
+		if len(notes) == 0 {
+			continue
+		}
+		text := strings.Join(notes, "\n")
+		if len(text) > maxGuidanceChars {
+			cut := maxGuidanceChars
+			for cut > 0 && !utf8.RuneStart(text[cut]) {
+				cut--
+			}
+			text = text[:cut] + "…"
+		}
+		parts = append(parts, fmt.Sprintf("Notes for the %q tools:\n%s", t.server, text))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func (b *Box) list(ctx context.Context, s Server) ([]Tool, error) {
@@ -376,6 +424,9 @@ func (b *Box) session(ctx context.Context, s Server) (*mcp.ClientSession, error)
 		return existing, nil
 	}
 	b.sessions[s.Name] = cs
+	if ir := cs.InitializeResult(); ir != nil {
+		b.instr[s.Name] = strings.TrimSpace(ir.Instructions)
+	}
 	b.mu.Unlock()
 	slog.Info("connected to mcp server", "server", s.Name, "url", s.URL)
 	return cs, nil
@@ -446,8 +497,9 @@ func (b *Box) Close() {
 	}
 }
 
-// ParseServers parses "name=url,name2=url2". tokens maps server name to bearer token.
-func ParseServers(spec string, token func(name string) string) ([]Server, error) {
+// ParseServers parses "name=url,name2=url2". setting(kind, name) returns per-server
+// settings: kind is "TOKEN" (bearer token) or "HINT" (usage notes for the model).
+func ParseServers(spec string, setting func(kind, name string) string) ([]Server, error) {
 	var out []Server
 	seen := map[string]bool{}
 	for _, part := range strings.Split(spec, ",") {
@@ -464,7 +516,7 @@ func ParseServers(spec string, token func(name string) string) ([]Server, error)
 			return nil, fmt.Errorf("MCP_SERVERS: duplicate name %q", name)
 		}
 		seen[name] = true
-		out = append(out, Server{Name: name, URL: url, Token: token(name)})
+		out = append(out, Server{Name: name, URL: url, Token: setting("TOKEN", name), Hint: setting("HINT", name)})
 	}
 	return out, nil
 }

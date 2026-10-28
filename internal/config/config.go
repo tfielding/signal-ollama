@@ -27,7 +27,7 @@ type Config struct {
 	SystemPrompt  string
 	OllamaTimeout time.Duration
 
-	MCPServers    []toolbox.Server // from MCP_SERVERS=name=url,...; tokens from MCP_TOKEN_<NAME>
+	MCPServers    []toolbox.Server // from MCP_SERVERS=name=url,...; MCP_TOKEN_<NAME>, MCP_HINT_<NAME>
 	MCPTools      map[string]bool  // optional allowlist of tool names
 	MCPAllowWrite bool             // expose tools not marked read-only
 	MCPMaxChars   int              // cap on tool output given to the model
@@ -64,8 +64,8 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("OLLAMA_TIMEOUT: %w", err)
 	}
 
-	if c.MCPServers, err = toolbox.ParseServers(os.Getenv("MCP_SERVERS"), func(name string) string {
-		return os.Getenv("MCP_TOKEN_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name)))
+	if c.MCPServers, err = toolbox.ParseServers(os.Getenv("MCP_SERVERS"), func(kind, name string) string {
+		return os.Getenv("MCP_" + kind + "_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name)))
 	}); err != nil {
 		return c, err
 	}

@@ -140,7 +140,7 @@ func runToolScenario(t *testing.T, capabilities []string) (map[string]any, []cha
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	box := toolbox.New([]toolbox.Server{{Name: "cams", URL: cams.URL, Token: "tok"}}, toolbox.Options{})
+	box := toolbox.New([]toolbox.Server{{Name: "cams", URL: cams.URL, Token: "tok", Hint: "Snapshots take a second."}}, toolbox.Options{})
 	defer box.Close()
 	st, _ := store.New(t.TempDir())
 	sc := sig.New(sigSrv.URL, botNum)
@@ -177,7 +177,8 @@ func TestToolSnapshotSentAsAttachment(t *testing.T) {
 	}
 
 	// Tool guidance is added after the main system prompt when tools are offered.
-	if len(reqs[0].Messages) < 2 || reqs[0].Messages[0].Role != "system" || !strings.Contains(reqs[0].Messages[0].Content, "call the tools again") {
+	if len(reqs[0].Messages) < 2 || reqs[0].Messages[0].Role != "system" || !strings.Contains(reqs[0].Messages[0].Content, "call them again") ||
+		!strings.Contains(reqs[0].Messages[0].Content, `Notes for the "cams" tools:`+"\nSnapshots take a second.") {
 		t.Fatalf("tool guidance missing: %+v", reqs[0].Messages)
 	}
 
@@ -228,7 +229,7 @@ func TestNoToolsForModelWithoutToolSupport(t *testing.T) {
 		t.Fatalf("tools offered to a model without tool support: %v", reqs[0].Tools)
 	}
 	for _, m := range reqs[0].Messages {
-		if strings.Contains(m.Content, "call the tools again") {
+		if strings.Contains(m.Content, "call them again") {
 			t.Fatal("tool guidance added without tools")
 		}
 	}

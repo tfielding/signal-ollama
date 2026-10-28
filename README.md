@@ -55,6 +55,7 @@ use the same signal-cli-rest-api account to *send* (alerts etc.) are unaffected.
 | `DATA_DIR` | `/data` | Chat history (one JSON file per chat) |
 | `MCP_SERVERS` | none | MCP servers to get tools from: `name=url,...`, e.g. `cams=http://go2rtc-mcp:8090/mcp` |
 | `MCP_TOKEN_<NAME>` | none | Bearer token for server `<name>` (uppercased, `-` and `.` become `_`), e.g. `MCP_TOKEN_CAMS` |
+| `MCP_HINT_<NAME>` | none | Optional usage notes for server `<name>`'s tools, added to the model's instructions, e.g. `MCP_HINT_HA=Call GetLiveContext without filters for overviews` |
 | `MCP_TOOLS` | all | Optional allowlist of tool names, e.g. `list_cameras,get_snapshot` |
 | `MCP_ALLOW_WRITE` | `false` | Also expose tools that are not marked read-only |
 | `MCP_MAX_RESULT_CHARS` | `32000` | Max characters of tool output passed to the model (about 8k tokens). Make sure Ollama's context window can hold it |
@@ -95,6 +96,11 @@ offered to the model.
 - Images returned by a tool are sent to you as Signal attachments with the reply. If the current
   model supports vision, it sees them too; otherwise it's told an image was sent.
 - The model can make up to 6 rounds of tool calls per message. `/stop` cancels tool calls too.
+- Usage notes are added to the model's instructions per server: whatever the server itself sends
+  when the bot connects (MCP "instructions"), plus your `MCP_HINT_<NAME>` if set. Tool-specific
+  advice belongs there, not in the code.
+- If a read-only tool call fails because of optional parameters the model guessed, it is retried
+  once without them. Tools that can change things are never retried this way.
 - `/status` lists the available tools and any server that's unreachable. Tool lists are refreshed
   every minute, and sessions reconnect automatically if a server restarts.
 

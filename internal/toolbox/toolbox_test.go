@@ -97,12 +97,12 @@ func TestReconnectsAfterServerRestart(t *testing.T) {
 }
 
 func TestParseServers(t *testing.T) {
-	got, err := ParseServers(" go2rtc=http://go2rtc-mcp:8090/mcp , ha=https://ha/mcp", func(n string) string { return "t-" + n })
-	if err != nil || len(got) != 2 || got[0].Name != "go2rtc" || got[0].URL != "http://go2rtc-mcp:8090/mcp" || got[1].Token != "t-ha" {
+	got, err := ParseServers(" go2rtc=http://go2rtc-mcp:8090/mcp , ha=https://ha/mcp", func(kind, n string) string { return kind + "-" + n })
+	if err != nil || len(got) != 2 || got[0].Name != "go2rtc" || got[0].URL != "http://go2rtc-mcp:8090/mcp" || got[1].Token != "TOKEN-ha" || got[1].Hint != "HINT-ha" {
 		t.Fatalf("%+v %v", got, err)
 	}
 	for _, bad := range []string{"noequals", "x=ftp://a", "a=http://x,a=http://y", "=http://x"} {
-		if _, err := ParseServers(bad, func(string) string { return "" }); err == nil {
+		if _, err := ParseServers(bad, func(string, string) string { return "" }); err == nil {
 			t.Errorf("%q: expected error", bad)
 		}
 	}
@@ -166,7 +166,7 @@ func TestInventedArgsDroppedEndToEnd(t *testing.T) {
 
 func TestUnwrapAndTruncate(t *testing.T) {
 	ha := `{"result": "Live Context:\n- names: Basement Door\n  domain: lock\n  state: locked"}`
-	if got := unwrap(ha); got != "Live Context:\n- names: Basement Door\n  domain: lock\n  state: locked" {
+	if got := unwrap(ha); got != "result:\nLive Context:\n- names: Basement Door\n  domain: lock\n  state: locked" {
 		t.Fatalf("unwrap: %q", got)
 	}
 	for _, keep := range []string{`{"cameras":["a"]}`, `{"a":"x","b":"y"}`, `plain text`, `{"n": 5}`} {
@@ -229,5 +229,59 @@ func TestRetryWithoutFiltersOnError(t *testing.T) {
 	out, _ = box.Call(ctx, "strict", nil)
 	if !out.IsError || out.Retried != "" || calls.Load() > 1 { // here the SDK rejects it before the handler runs
 		t.Fatalf("no-arg failure retried: calls=%d", calls.Load())
+	}
+}
+
+func TestNoRetryForActionTools(t *testing.T) {
+	type in struct {
+		Area string `json:"area,omitempty"`
+	}
+	var calls atomic.Int32
+	s := mcp.NewServer(&mcp.Implementation{Name: "ha", Version: "1"}, nil)
+	mcp.AddTool(s, &mcp.Tool{Name: "turn_off"}, // not read-only
+		func(_ context.Context, _ *mcp.CallToolRequest, a in) (*mcp.CallToolResult, any, error) {
+			calls.Add(1)
+			if a.Area == "" {
+				t.Error("action tool was retried without its arguments")
+			}
+			return nil, nil, fmt.Errorf("Area '%s' does not exist", a.Area)
+		})
+	srv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil))
+	defer srv.Close()
+	box := New([]Server{{Name: "ha", URL: srv.URL}}, Options{AllowWrite: true})
+	defer box.Close()
+	out, _ := box.Call(context.Background(), "turn_off", map[string]any{"area": "Kitchen"})
+	if !out.IsError || out.Retried != "" || calls.Load() != 1 {
+		t.Fatalf("got %+v calls=%d", out, calls.Load())
+	}
+}
+
+func TestGuidanceFromServerAndConfig(t *testing.T) {
+	s := mcp.NewServer(&mcp.Implementation{Name: "ha", Version: "1"}, &mcp.ServerOptions{Instructions: "Use GetLiveContext for overviews."})
+	mcp.AddTool(s, &mcp.Tool{Name: "live", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
+		func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil, nil
+		})
+	srv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil))
+	defer srv.Close()
+	plain := server(t, "cams", "snap") // no instructions, no hint
+
+	box := New([]Server{
+		{Name: "ha", URL: srv.URL, Hint: "Call it without filters."},
+		{Name: "cams", URL: plain.URL},
+		{Name: "long", URL: plain.URL, Hint: strings.Repeat("x", 5000)},
+	}, Options{})
+	defer box.Close()
+	tools := box.Tools(context.Background())
+	g := box.Guidance(tools)
+	if !strings.Contains(g, `Notes for the "ha" tools:`) || !strings.Contains(g, "Use GetLiveContext for overviews.") ||
+		!strings.Contains(g, "Call it without filters.") || strings.Contains(g, `"cams"`) {
+		t.Fatalf("guidance: %q", g)
+	}
+	if !strings.Contains(g, `"long"`) || len(g) > 2*maxGuidanceChars+200 {
+		t.Fatalf("long hint not capped: %d chars", len(g))
+	}
+	if box.Guidance(nil) != "" {
+		t.Fatal("guidance without tools")
 	}
 }
