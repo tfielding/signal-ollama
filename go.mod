@@ -2,7 +2,7 @@ module github.com/tfielding/signal-ollama
 
 go 1.25.0
 
-require github.com/coder/websocket v1.8.12
+require github.com/coder/websocket v1.8.15
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect
