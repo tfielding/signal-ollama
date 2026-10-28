@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"signal-ollama/internal/ollama"
-	"signal-ollama/internal/signal"
-	"signal-ollama/internal/store"
+	"github.com/tfielding/signal-ollama/internal/ollama"
+	"github.com/tfielding/signal-ollama/internal/signalcli"
+	"github.com/tfielding/signal-ollama/internal/store"
 )
 
 const (
@@ -28,7 +28,7 @@ type fakeMsg struct {
 	ch     chan string
 }
 
-func (f *fakeMsg) Send(_ context.Context, to, text string, styled bool, att []signal.Attachment) error {
+func (f *fakeMsg) Send(_ context.Context, to, text string, styled bool, att []signalcli.Attachment) error {
 	f.mu.Lock()
 	f.sent = append(f.sent, to+": "+text)
 	f.styled = append(f.styled, styled)
@@ -98,7 +98,15 @@ func (f *fakeLLM) Info(_ context.Context, model string) (ollama.ModelInfo, error
 	return ollama.ModelInfo{}, nil // no metadata
 }
 
-func setup(t *testing.T) (*Bot, *fakeMsg, *fakeLLM, *store.Store) {
+// testBot binds a Bot to the test's context so tests can call Handle(env).
+type testBot struct {
+	*Bot
+	ctx context.Context
+}
+
+func (t testBot) Handle(env signalcli.Envelope) { t.Bot.Handle(t.ctx, env) }
+
+func setup(t *testing.T) (testBot, *fakeMsg, *fakeLLM, *store.Store) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	st, err := store.New(t.TempDir())
@@ -107,16 +115,16 @@ func setup(t *testing.T) (*Bot, *fakeMsg, *fakeLLM, *store.Store) {
 	}
 	m := &fakeMsg{ch: make(chan string, 10)}
 	l := &fakeLLM{}
-	b := New(ctx, m, l, st, Options{
+	b := New(m, l, st, Options{
 		OwnNumber: own, Allowed: map[string]bool{me: true}, DefaultModel: "llama3.2:latest",
 		SystemPrompt: "sys", HistoryLimit: 4, TypingRefresh: 5 * time.Millisecond,
 	})
 	t.Cleanup(func() { cancel(); b.Wait() })
-	return b, m, l, st
+	return testBot{b, ctx}, m, l, st
 }
 
-func dm(from, text string) signal.Envelope {
-	return signal.Envelope{SourceNumber: from, Source: from, DataMessage: &signal.DataMessage{Message: text}}
+func dm(from, text string) signalcli.Envelope {
+	return signalcli.Envelope{SourceNumber: from, Source: from, DataMessage: &signalcli.DataMessage{Message: text}}
 }
 
 func reply(t *testing.T, m *fakeMsg) string {
@@ -143,12 +151,12 @@ func TestBoundaries(t *testing.T) {
 	b, m, _, _ := setup(t)
 
 	group := dm(me, "hi in a group chat")
-	group.DataMessage.GroupInfo = &signal.GroupInfo{GroupID: "abc"}
+	group.DataMessage.GroupInfo = &signalcli.GroupInfo{GroupID: "abc"}
 	b.Handle(group)
 	b.Handle(dm(other, "hi from someone else"))
 	b.Handle(dm(own, "outgoing alert"))
-	b.Handle(signal.Envelope{SourceNumber: own, SyncMessage: []byte(`{"sentMessage":{"message":"alert"}}`)})
-	b.Handle(signal.Envelope{SourceNumber: me}) // receipt / typing, no dataMessage
+	b.Handle(signalcli.Envelope{SourceNumber: own, SyncMessage: []byte(`{"sentMessage":{"message":"alert"}}`)})
+	b.Handle(signalcli.Envelope{SourceNumber: me}) // receipt / typing, no dataMessage
 	b.Handle(dm(me, "   "))
 	expectSilence(t, m)
 
@@ -431,7 +439,7 @@ func TestStop(t *testing.T) {
 	close(gate)
 }
 
-func waitBusy(t *testing.T, b *Bot, sender string) {
+func waitBusy(t *testing.T, b testBot, sender string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

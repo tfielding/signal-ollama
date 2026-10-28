@@ -1,5 +1,8 @@
 # signal-ollama
 
+[![ci](https://github.com/tfielding/signal-ollama/actions/workflows/ci.yml/badge.svg)](https://github.com/tfielding/signal-ollama/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Chat with your own Ollama models over Signal. A small Go service that sits next to
 [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) and
 answers direct messages from an allowlist of phone numbers.
@@ -111,8 +114,19 @@ offered to the model.
 - In json-rpc mode, messages that arrive while signal-ollama is down are not replayed.
 - Chat history is stored unencrypted in `DATA_DIR`.
 
+## Install without Docker
+
+```bash
+go install github.com/tfielding/signal-ollama@latest
+signal-ollama -version
+```
+
 ## Develop
 
 ```bash
 go test -race ./...
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full set of checks CI runs, and
+[SECURITY.md](SECURITY.md) for reporting vulnerabilities. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).

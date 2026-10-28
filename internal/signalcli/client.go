@@ -1,5 +1,5 @@
-// Package signal talks to bbernhard/signal-cli-rest-api running in MODE=json-rpc.
-package signal
+// Package signalcli talks to bbernhard/signal-cli-rest-api running in MODE=json-rpc.
+package signalcli
 
 import (
 	"bytes"
@@ -57,7 +57,7 @@ func New(baseURL, number string) *Client {
 
 // Listen connects to the receive websocket and calls handle for every envelope.
 // It reconnects with backoff until ctx is cancelled.
-func (c *Client) Listen(ctx context.Context, handle func(Envelope)) error {
+func (c *Client) Listen(ctx context.Context, handle func(context.Context, Envelope)) error {
 	wsURL := strings.Replace(c.base, "http", "ws", 1) + "/v1/receive/" + url.PathEscape(c.number)
 	backoff := time.Second
 	for {
@@ -75,7 +75,7 @@ func (c *Client) Listen(ctx context.Context, handle func(Envelope)) error {
 	}
 }
 
-func (c *Client) listenOnce(ctx context.Context, wsURL string, handle func(Envelope), connected func()) error {
+func (c *Client) listenOnce(ctx context.Context, wsURL string, handle func(context.Context, Envelope), connected func()) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		return err
@@ -97,7 +97,7 @@ func (c *Client) listenOnce(ctx context.Context, wsURL string, handle func(Envel
 			slog.Warn("skipping unparseable message", "err", err)
 			continue
 		}
-		handle(msg.Envelope)
+		handle(ctx, msg.Envelope)
 	}
 }
 

@@ -1,4 +1,4 @@
-module signal-ollama
+module github.com/tfielding/signal-ollama
 
 go 1.25.0
 

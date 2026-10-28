@@ -1,4 +1,5 @@
 .git
+.github
 data
 signal-ollama
 *.md

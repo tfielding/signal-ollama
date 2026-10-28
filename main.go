@@ -4,21 +4,35 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"signal-ollama/internal/bot"
-	"signal-ollama/internal/config"
-	"signal-ollama/internal/ollama"
-	sig "signal-ollama/internal/signal"
-	"signal-ollama/internal/store"
-	"signal-ollama/internal/toolbox"
+	"github.com/tfielding/signal-ollama/internal/bot"
+	"github.com/tfielding/signal-ollama/internal/config"
+	"github.com/tfielding/signal-ollama/internal/ollama"
+	"github.com/tfielding/signal-ollama/internal/signalcli"
+	"github.com/tfielding/signal-ollama/internal/store"
+	"github.com/tfielding/signal-ollama/internal/toolbox"
 )
 
+// version is set at build time: -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print the version and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: signal-ollama [-version]\n\nConfigured with environment variables; see the README.\n")
+	}
+	flag.Parse()
+	if *showVersion {
+		fmt.Println("signal-ollama", version)
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -45,7 +59,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	sc := sig.New(cfg.SignalURL, cfg.SignalNumber)
+	sc := signalcli.New(cfg.SignalURL, cfg.SignalNumber)
 	var tools bot.Tools
 	if len(cfg.MCPServers) > 0 {
 		box := toolbox.New(cfg.MCPServers, toolbox.Options{Allowed: cfg.MCPTools, AllowWrite: cfg.MCPAllowWrite, MaxResultChars: cfg.MCPMaxChars})
@@ -57,7 +71,7 @@ func run() error {
 		slog.Info("mcp tools", "servers", len(cfg.MCPServers), "tools", names)
 		tools = box
 	}
-	b := bot.New(ctx, sc, llm, st, bot.Options{
+	b := bot.New(sc, llm, st, bot.Options{
 		Tools:        tools,
 		OwnNumber:    cfg.SignalNumber,
 		Allowed:      cfg.Allowed,
@@ -66,7 +80,7 @@ func run() error {
 		HistoryLimit: cfg.HistoryLimit,
 	})
 
-	slog.Info("starting", "signal", cfg.SignalURL, "ollama", cfg.OllamaURL, "model", cfg.DefaultModel, "allowed", len(cfg.Allowed))
+	slog.Info("starting", "version", version, "signal", cfg.SignalURL, "ollama", cfg.OllamaURL, "model", cfg.DefaultModel, "allowed", len(cfg.Allowed))
 	err = sc.Listen(ctx, b.Handle)
 	b.Wait()
 	if errors.Is(err, context.Canceled) {

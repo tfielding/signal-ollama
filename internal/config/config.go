@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"signal-ollama/internal/toolbox"
+	"github.com/tfielding/signal-ollama/internal/toolbox"
 )
 
 const defaultSystemPrompt = "You are a helpful assistant chatting over Signal on a phone. " +

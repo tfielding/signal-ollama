@@ -30,7 +30,7 @@ var (
 	italRe     = regexp.MustCompile(`(^|[^\w*\\])\*([^*\s](?:[^*\n]*[^*\s])?)\*`)
 	italUndRe  = regexp.MustCompile(`(^|[^\w])_([^_\s](?:[^_\n]*[^_\s])?)_`)
 	strikeRe   = regexp.MustCompile(`~~([^~\n]+?)~~`)
-	holdRe     = regexp.MustCompile("(\\d+)")
+	holdRe     = regexp.MustCompile(`\x{E000}(\d+)\x{E001}`) // placeholder: private-use runes around an index
 )
 
 // ToSignal converts Markdown to Signal styled text.
@@ -132,7 +132,7 @@ func inline(s string) string {
 	var held []string
 	hold := func(x string) string {
 		held = append(held, x)
-		return fmt.Sprintf("%d", len(held)-1)
+		return fmt.Sprintf("\uE000%d\uE001", len(held)-1)
 	}
 
 	s = codeRe.ReplaceAllStringFunc(s, func(m string) string {

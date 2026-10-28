@@ -11,10 +11,10 @@ import (
 
 	"github.com/coder/websocket"
 
-	"signal-ollama/internal/bot"
-	"signal-ollama/internal/ollama"
-	sig "signal-ollama/internal/signal"
-	"signal-ollama/internal/store"
+	"github.com/tfielding/signal-ollama/internal/bot"
+	"github.com/tfielding/signal-ollama/internal/ollama"
+	"github.com/tfielding/signal-ollama/internal/signalcli"
+	"github.com/tfielding/signal-ollama/internal/store"
 )
 
 // TestEndToEnd runs the real clients against fake signal-cli-rest-api and Ollama servers.
@@ -101,8 +101,8 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("firstModel = %q, %v", model, err)
 	}
 	st, _ := store.New(t.TempDir())
-	sc := sig.New(signalSrv.URL, botNum)
-	b := bot.New(ctx, sc, llm, st, bot.Options{
+	sc := signalcli.New(signalSrv.URL, botNum)
+	b := bot.New(sc, llm, st, bot.Options{
 		OwnNumber: botNum, Allowed: map[string]bool{me: true}, DefaultModel: model, HistoryLimit: 10,
 	})
 	done := make(chan error)

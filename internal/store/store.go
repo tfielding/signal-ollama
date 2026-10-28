@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"signal-ollama/internal/ollama"
+	"github.com/tfielding/signal-ollama/internal/ollama"
 )
 
 type Chat struct {

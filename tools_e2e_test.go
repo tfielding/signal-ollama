@@ -14,11 +14,11 @@ import (
 	"github.com/coder/websocket"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"signal-ollama/internal/bot"
-	"signal-ollama/internal/ollama"
-	sig "signal-ollama/internal/signal"
-	"signal-ollama/internal/store"
-	"signal-ollama/internal/toolbox"
+	"github.com/tfielding/signal-ollama/internal/bot"
+	"github.com/tfielding/signal-ollama/internal/ollama"
+	"github.com/tfielding/signal-ollama/internal/signalcli"
+	"github.com/tfielding/signal-ollama/internal/store"
+	"github.com/tfielding/signal-ollama/internal/toolbox"
 )
 
 var testJPEG = []byte{0xFF, 0xD8, 0xFF, 0xE0, 'j', 'p', 'g', 0xFF, 0xD9}
@@ -143,8 +143,8 @@ func runToolScenario(t *testing.T, capabilities []string) (map[string]any, []cha
 	box := toolbox.New([]toolbox.Server{{Name: "cams", URL: cams.URL, Token: "tok", Hint: "Snapshots take a second."}}, toolbox.Options{})
 	defer box.Close()
 	st, _ := store.New(t.TempDir())
-	sc := sig.New(sigSrv.URL, botNum)
-	b := bot.New(ctx, sc, ollama.New(llmSrv.URL, 5*time.Second), st, bot.Options{
+	sc := signalcli.New(sigSrv.URL, botNum)
+	b := bot.New(sc, ollama.New(llmSrv.URL, 5*time.Second), st, bot.Options{
 		Tools: box, OwnNumber: botNum, Allowed: map[string]bool{me: true}, DefaultModel: "m", HistoryLimit: 10,
 	})
 	done := make(chan struct{})
@@ -272,8 +272,8 @@ func TestRepeatedToolFailuresStopEarly(t *testing.T) {
 	box := toolbox.New([]toolbox.Server{{Name: "cams", URL: cams.URL, Token: "tok"}}, toolbox.Options{})
 	defer box.Close()
 	st, _ := store.New(t.TempDir())
-	sc := sig.New(sigSrv.URL, botNum)
-	b := bot.New(ctx, sc, ollama.New(llm.URL, 5*time.Second), st, bot.Options{
+	sc := signalcli.New(sigSrv.URL, botNum)
+	b := bot.New(sc, ollama.New(llm.URL, 5*time.Second), st, bot.Options{
 		Tools: box, OwnNumber: botNum, Allowed: map[string]bool{me: true}, DefaultModel: "m", HistoryLimit: 10,
 	})
 	done := make(chan struct{})
