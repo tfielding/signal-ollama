@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-29
+
 ### Added
 - Chat with Ollama models over Signal via signal-cli-rest-api (json-rpc mode).
 - Allowlist of senders; group chats and the account's own messages are ignored.

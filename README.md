@@ -130,3 +130,10 @@ go test -race ./...
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full set of checks CI runs, and
 [SECURITY.md](SECURITY.md) for reporting vulnerabilities. Changes are listed in
 [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
+
+signal-ollama is an independent project, not affiliated with or endorsed by the Signal
+Technology Foundation or Ollama Inc. Signal and Ollama are trademarks of their respective owners.
