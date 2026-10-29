@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    # Docs-only pushes skip CI. Not applied to PRs: a skipped required check would block them.
+    paths-ignore: ["**.md", "LICENSE", "THIRD_PARTY_LICENSES"]
   pull_request:
 
 permissions:
