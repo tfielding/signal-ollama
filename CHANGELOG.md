@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Docker `:latest` now points to the newest release. Builds from `main` are published as `:edge`,
+  and releases also get a `major.minor` tag (e.g. `:0.1`).
+
 ## [0.1.0] - 2026-10-29
 
 ### Added
